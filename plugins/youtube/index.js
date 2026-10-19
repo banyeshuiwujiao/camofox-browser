@@ -48,20 +48,22 @@ export async function register(app, ctx, pluginConfig = {}) {
       log('info', 'youtube transcript: starting', { reqId, videoId, lang, method: hasYtDlp() ? 'yt-dlp' : 'browser', hasProxy: !!ytDlpProxyUrl });
 
       let result;
+      let ytError = null;
       if (hasYtDlp()) {
         try {
           result = await ytDlpTranscript(reqId, url, videoId, lang, ytDlpProxyUrl);
         } catch (ytErr) {
           log('warn', 'yt-dlp threw, falling back to browser', { reqId, error: ytErr.message });
+          ytError = ytErr;
           result = null;
         }
         // If yt-dlp returned an error result (e.g. no captions) or threw, try browser
         if (!result || result.status !== 'ok') {
           if (result) log('warn', 'yt-dlp returned error, falling back to browser', { reqId, status: result.status, code: result.code });
-          result = await browserTranscript(reqId, url, videoId, lang);
+          result = await browserTranscript(reqId, url, videoId, lang, ytError);
         }
       } else {
-        result = await browserTranscript(reqId, url, videoId, lang);
+        result = await browserTranscript(reqId, url, videoId, lang, null);
       }
 
       log('info', 'youtube transcript: done', { reqId, videoId, status: result.status, words: result.total_words });
@@ -74,7 +76,7 @@ export async function register(app, ctx, pluginConfig = {}) {
   });
 
   // Browser fallback -- play video, intercept timedtext network response
-  async function browserTranscript(reqId, url, videoId, lang) {
+  async function browserTranscript(reqId, url, videoId, lang, ytError = null) {
     return await withUserLimit('__yt_transcript__', async () => {
       await ensureBrowser();
       const session = await getSession('__yt_transcript__');
@@ -98,7 +100,16 @@ export async function register(app, ctx, pluginConfig = {}) {
         });
 
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAVIGATE_TIMEOUT_MS });
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(1500);
+
+        // Attempt to dismiss common YouTube consent/privacy dialogs if present
+        try {
+          const consentBtn = page.locator('button:has-text("Accept all"), button:has-text("Reject all"), button:has-text("I agree"), form[action*="consent"] button').first();
+          if (await consentBtn.isVisible({ timeout: 1500 })) {
+            await consentBtn.click();
+            await page.waitForTimeout(1000);
+          }
+        } catch {}
 
         // Extract caption track URLs and metadata from ytInitialPlayerResponse
         const meta = await page.evaluate(() => {
@@ -155,6 +166,39 @@ export async function register(app, ctx, pluginConfig = {}) {
         }
 
         if (!interceptedCaptions) {
+          const checkStatus = await page.evaluate(() => {
+            const text = document.body?.innerText || '';
+            const hasBotBlock = text.includes("Sign in to confirm you’re not a bot") ||
+                                text.includes("Sign in to confirm you're not a bot");
+            const hasLoginWall = text.includes("Sign in to confirm your age");
+            const r = window.ytInitialPlayerResponse || (typeof ytInitialPlayerResponse !== 'undefined' ? ytInitialPlayerResponse : null);
+            const playability = r?.playabilityStatus?.status;
+            const playabilityReason = r?.playabilityStatus?.reason || '';
+            return { hasBotBlock, hasLoginWall, playability, playabilityReason };
+          }).catch(() => ({}));
+
+          const ytBotBlocked = (ytError?.message && (ytError.message.includes('Sign in to confirm') || ytError.message.includes('bot')));
+          if (checkStatus.hasBotBlock || ytBotBlocked) {
+            return {
+              status: 'error',
+              code: 403,
+              message: "YouTube anti-bot verification required ('Sign in to confirm you’re not a bot'). Configure cookies to authenticate.",
+              video_url: url,
+              video_id: videoId,
+              title: meta.title,
+            };
+          }
+          if (checkStatus.hasLoginWall || checkStatus.playability === 'LOGIN_REQUIRED') {
+            return {
+              status: 'error',
+              code: 403,
+              message: `YouTube login required (${checkStatus.playabilityReason || 'sign in required to view this video'}).`,
+              video_url: url,
+              video_id: videoId,
+              title: meta.title,
+            };
+          }
+
           return {
             status: 'error', code: 404,
             message: 'No captions available for this video',

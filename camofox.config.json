@@ -2,8 +2,10 @@
   "id": "camofox-browser",
   "name": "Camofox Browser",
   "version": "1.6.0",
-  "newPageTimeoutMs": 10000,
-  "interactive": { "mode": "off" },
+  "newPageTimeoutMs": 30000,
+  "disableDefaultAddons": false,
+  "interactive": { "mode": "desktop" },
+  "workarounds": { "disableContentSandbox": true },
   "plugins": {
     "youtube": { "enabled": true },
     "persistence": { "enabled": true },

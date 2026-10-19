@@ -66,6 +66,12 @@ import {
 
 const CONFIG = loadConfig();
 
+// Windows content-process sandbox workaround (see lib/config.js). Playwright hands this
+// process's environment to the browser, so setting it here is enough to reach Camoufox.
+if (CONFIG.disableContentSandbox) {
+  process.env.MOZ_DISABLE_CONTENT_SANDBOX = '1';
+}
+
 // --- Crash reporter (opt-in, anonymized GitHub issues) ---
 import { readFileSync } from 'fs';
 const _pkgVersion = (() => { try { return JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version; } catch { return 'unknown'; } })();
@@ -300,6 +306,9 @@ function sendError(res, err, extraFields = {}) {
   };
   if (code) body.code = code;
   if (recovery) body.recovery = recovery;
+  if (code === 'ambiguous_selector') {
+    body.hint = 'The selector matched multiple elements. Call snapshot to get a unique ref (e.g. e1), or make the selector more specific.';
+  }
   if (err instanceof StaleRefsError) body.ref = err.ref;
   if (status >= 500 && !err.statusCode && !recovery) {
     const req = res.req;
@@ -1179,6 +1188,14 @@ async function launchBrowserInstance() {
         locale: launchLocale({ hasProxy: !!proxyPool, directIdentity: CONFIG.directIdentity }),
         virtual_display: vdDisplay,
         exclude_addons: CONFIG.disableDefaultAddons ? ['UBO'] : undefined,
+        // Belt-and-braces for the content-sandbox workaround: Firefox's
+        // MOZ_DISABLE_CONTENT_SANDBOX escape hatch resolves to this same pref, and
+        // camoufox-js merges caller-supplied firefox_user_prefs into its own
+        // (utils.js keeps the object and mergeInto()s its prefs into it), so this
+        // cannot displace Camoufox's fingerprint prefs.
+        ...(CONFIG.disableContentSandbox
+          ? { firefox_user_prefs: { 'security.sandbox.content.level': 0 } }
+          : {}),
       }, {
         attempt,
         proxyServer: launchProxy?.server || null,

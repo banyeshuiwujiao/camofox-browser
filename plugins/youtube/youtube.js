@@ -12,7 +12,10 @@ import { join } from 'path';
 const runProgram = childProcess.execFile;
 
 const YT_DLP_CANDIDATES = ['yt-dlp', '/usr/local/bin/yt-dlp', '/usr/bin/yt-dlp'];
-const SAFE_ENV_KEYS = ['PATH', 'HOME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TMPDIR'];
+const SAFE_ENV_KEYS = [
+  'PATH', 'HOME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TMPDIR',
+  'TEMP', 'TMP', 'SystemRoot', 'SYSTEMROOT', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'ComSpec', 'COMSPEC',
+];
 const LANG_RE = /^[a-z]{2,3}(?:-[a-zA-Z0-9]{2,8})?$/;
 
 // Detect yt-dlp binary at startup
@@ -123,11 +126,14 @@ async function ytDlpTranscript(reqId, url, videoId, lang, proxyUrl = null) {
 
   // Build proxy args if a proxy URL is provided
   const proxyArgs = proxyUrl ? ['--proxy', proxyUrl] : [];
+  const cookieFile = process.env.YOUTUBE_COOKIES_FILE || process.env.YT_DLP_COOKIES;
+  const cookiesFromBrowser = process.env.YOUTUBE_COOKIES_FROM_BROWSER;
+  const cookieArgs = cookieFile ? ['--cookies', cookieFile] : (cookiesFromBrowser ? ['--cookies-from-browser', cookiesFromBrowser] : []);
 
   try {
     const titleResult = await runYtDlp(
       ytDlpPath,
-      [...proxyArgs, '--skip-download', '--no-warnings', '--print', '%(title)s', normalizedUrl],
+      [...proxyArgs, ...cookieArgs, '--skip-download', '--no-warnings', '--print', '%(title)s', normalizedUrl],
       15000,
     );
     const title = titleResult.stdout.trim().split('\n')[0] || '';
@@ -136,6 +142,7 @@ async function ytDlpTranscript(reqId, url, videoId, lang, proxyUrl = null) {
       ytDlpPath,
       [
         ...proxyArgs,
+        ...cookieArgs,
         '--skip-download',
         '--write-sub',
         '--write-auto-sub',
