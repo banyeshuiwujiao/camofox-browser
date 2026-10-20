@@ -26,7 +26,7 @@ XPI on disk makes launch fast and **network-independent**.
 ### One command
 
 ```bash
-# from plugins/camofox-browser/
+# from camofox-browser/ (repo root)
 node scripts/install-ubo.mjs            # download from AMO (resumable) + extract + set config
 node scripts/install-ubo.mjs ubo.xpi    # use a locally-downloaded XPI instead of downloading
 node scripts/install-ubo.mjs --check    # only verify the cached addon is present/valid
