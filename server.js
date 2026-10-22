@@ -1738,6 +1738,7 @@ async function recycleOldestTab(session, reqId, userId) {
   let oldestTabId = null;
   for (const [gKey, group] of session.tabGroups) {
     for (const [tid, ts] of group) {
+      if (ts.pinned) continue; // 锁定的标签页免疫回收
       if (!oldestTab || ts.toolCalls < oldestTab.toolCalls) {
         oldestTab = ts;
         oldestGroup = group;
@@ -1785,6 +1786,21 @@ function findTab(session, tabId) {
 // 410 Gone tells clients the tab existed but the browser crashed — create a new one.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// 记录近期被回收的标签页（LRU 最多 300 条），在 404 时给出明确、可操作的排障提示
+const reapedTabs = new Map();
+function recordReapedTab(tabId, details = {}) {
+  if (reapedTabs.size >= 300) {
+    const oldestKey = reapedTabs.keys().next().value;
+    reapedTabs.delete(oldestKey);
+  }
+  reapedTabs.set(tabId, {
+    reapedAt: Date.now(),
+    idleMs: details.idleMs || 300000,
+    userId: details.userId,
+    reason: details.reason || 'inactive',
+  });
+}
+
 function tabNotFoundResponse(res, tabId) {
   // Only return 410 for tabs that look like valid UUIDs (plausibly created by this server),
   // belonged to this machine, and were lost in a recent browser restart.
@@ -1799,13 +1815,33 @@ function tabNotFoundResponse(res, tabId) {
       code: 'browser_restarted',
     });
   }
-  return res.status(404).json({ error: 'Tab not found' });
+
+  if (reapedTabs.has(tabId)) {
+    const info = reapedTabs.get(tabId);
+    const idleSec = Math.round((info.idleMs || 300000) / 1000);
+    return res.status(404).json({
+      error: `标签页已因空闲超过 ${idleSec} 秒被自动回收（tabId: ${tabId}）。`,
+      code: 'tab_reaped',
+      tabId,
+      idleMs: info.idleMs,
+      reapedAt: info.reapedAt,
+      hint: '建议排障操作：1) 调用 action=tabs 查看当前存活标签页；2) 调用 action=open 重新打开目标网址；3) 若后续需长时间保留页面（避免 5 分钟空闲自动回收），请在 open 时传入 pin: true（或通过 action=pin 锁定标签页）。',
+    });
+  }
+
+  return res.status(404).json({
+    error: `标签页未找到（tabId: ${tabId}）。可能已被空闲回收或会话已结束。`,
+    code: 'tab_not_found',
+    tabId,
+    hint: '建议排障操作：1) 调用 action=tabs 列出存活标签页；2) 调用 action=open 重新创建标签页；3) 若需长期保留请设置 pin: true。',
+  });
 }
 
-function createTabState(page) {
+function createTabState(page, options = {}) {
   const healthTracker = createTabHealthTracker(page);
   const tabState = {
     page,
+    pinned: Boolean(options.pinned),
     refs: new Map(),
     visitedUrls: new Set(),
     downloads: [],
@@ -1899,6 +1935,11 @@ async function camofoxPressureCleanup(options = {}) {
         const lockState = pressureLockState(tabId);
         if (lockState.active || lockState.queued > 0) {
           preserved.locked += 1;
+          continue;
+        }
+
+        if (tabState.pinned) {
+          preserved.pinned = (preserved.pinned || 0) + 1;
           continue;
         }
 
@@ -2990,8 +3031,9 @@ app.post('/tabs', async (req, res) => {
       const lease = createdPage.lease;
       const group = getTabGroup(session, resolvedSessionKey);
 
+      const isPinned = Boolean(req.body.pin ?? req.body.pinned);
       const tabId = fly.makeTabId();
-      let tabState = createTabState(page);
+      let tabState = createTabState(page, { pinned: isPinned });
       attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
       group.set(tabId, tabState);
       createdTabId = tabId;
@@ -3028,7 +3070,7 @@ app.post('/tabs', async (req, res) => {
             session = await getSession(userId, { trace: !!trace });
             const retryGroup = getTabGroup(session, resolvedSessionKey);
             const { page: retryPage, lease: retryLease } = await createLeasedPage(session);
-            tabState = createTabState(retryPage);
+            tabState = createTabState(retryPage, { pinned: isPinned });
             page = retryPage;
             tabState.lastRequestedUrl = url;
             attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
@@ -3064,6 +3106,7 @@ app.post('/tabs', async (req, res) => {
         url: page.url(),
         httpStatus: tabState.lastNavigationHttpStatus,
         navigationOk: tabState.lastNavigationHttpStatus === null || tabState.lastNavigationHttpStatus < 400,
+        pinned: Boolean(tabState.pinned),
       };
     })(), tabCreateRequestTimeoutMs(), 'tab create');
 
@@ -4782,6 +4825,70 @@ app.post('/tabs/:tabId/viewport', async (req, res) => {
   }
 });
 
+// Pin / Unpin Tab
+/**
+ * @openapi
+ * /tabs/{tabId}/pin:
+ *   post:
+ *     tags: [Tabs]
+ *     summary: Pin or unpin a tab to prevent idle reaping
+ *     parameters:
+ *       - name: tabId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               userId:
+ *                 type: string
+ *               pinned:
+ *                 type: boolean
+ *                 default: true
+ *     responses:
+ *       200:
+ *         description: Pin state updated.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok:
+ *                   type: boolean
+ *                 tabId:
+ *                   type: string
+ *                 pinned:
+ *                   type: boolean
+ *       404:
+ *         description: Tab not found.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+app.post('/tabs/:tabId/pin', async (req, res) => {
+  try {
+    const { tabId } = req.params;
+    const userId = req.body?.userId || req.query?.userId || 'default';
+    const pinned = req.body?.pinned !== false && req.body?.pin !== false;
+    const session = sessions.get(normalizeUserId(userId));
+    if (!session) return tabNotFoundResponse(res, tabId);
+    const found = findTab(session, tabId);
+    if (!found) return tabNotFoundResponse(res, tabId);
+    found.tabState.pinned = pinned;
+    found.tabState.toolCalls++;
+    log('info', 'tab pin updated', { tabId, userId, pinned });
+    res.json({ ok: true, tabId, pinned });
+  } catch (err) {
+    log('error', 'tab pin failed', { reqId: req.reqId, error: err.message });
+    handleRouteError(err, req, res);
+  }
+});
+
 // Back
 /**
  * @openapi
@@ -6150,6 +6257,7 @@ setInterval(() => {
   for (const [userId, session] of sessions) {
     for (const [listItemId, group] of session.tabGroups) {
       for (const [tabId, tabState] of group) {
+        if (tabState.pinned) continue; // 锁定的标签页免疫空闲自动回收
         if (!tabState._lastReaperCheck) {
           tabState._lastReaperCheck = now;
           tabState._lastReaperToolCalls = tabState.toolCalls;
@@ -6159,6 +6267,7 @@ setInterval(() => {
           const idleMs = now - tabState._lastReaperCheck;
           if (idleMs >= TAB_INACTIVITY_MS) {
             tabsReapedTotal.inc();
+            recordReapedTab(tabId, { userId, listItemId, idleMs });
             log('info', 'tab reaped (inactive)', { userId, tabId, listItemId, idleMs, toolCalls: tabState.toolCalls });
             safePageClose(tabState.page);
             group.delete(tabId);
@@ -6358,7 +6467,8 @@ app.get('/tabs', async (req, res) => {
           tabId,
           url: tabState.page.url(),
           title: await tabState.page.title().catch(() => ''),
-          listItemId
+          listItemId,
+          pinned: Boolean(tabState.pinned)
         });
       }
     }
