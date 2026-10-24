@@ -4698,10 +4698,17 @@ app.post('/tabs/:tabId/press', async (req, res) => {
  *                 type: string
  *               direction:
  *                 type: string
- *                 description: '"up" or "down" (default "down").'
+ *                 description: '"up", "down", "left", or "right" (default "down").'
  *               amount:
  *                 type: integer
  *                 description: Pixels to scroll.
+ *               timeoutMs:
+ *                 type: integer
+ *                 description: >
+ *                   Max milliseconds to wait for the scroll (default 5000, clamped to 500-30000).
+ *                   Scrolling is injected as native `window.scrollBy({behavior:"instant"})` so it
+ *                   never blocks on network idle — streaming/video pages that permanently hold
+ *                   long-lived connections no longer hang for 30s.
  *     responses:
  *       200:
  *         description: Scroll result.
@@ -4721,7 +4728,7 @@ app.post('/tabs/:tabId/press', async (req, res) => {
  */
 app.post('/tabs/:tabId/scroll', async (req, res) => {
   try {
-    const { userId, direction = 'down', amount = 500 } = req.body;
+    const { userId, direction = 'down', amount = 500, timeoutMs = 5000 } = req.body;
     const session = sessions.get(normalizeUserId(userId));
     const found = session && findTab(session, req.params.tabId);
     if (!found) return tabNotFoundResponse(res, req.params.tabId || req.body?.tabId);
@@ -4730,12 +4737,24 @@ app.post('/tabs/:tabId/scroll', async (req, res) => {
     const { tabState } = found;
     tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
     
+    const isVertical = direction === 'up' || direction === 'down';
+    const delta = (direction === 'up' || direction === 'left') ? -amount : amount;
+    const dx = isVertical ? 0 : delta;
+    const dy = isVertical ? delta : 0;
+    const scrollTimeout = Math.min(Math.max(Number(timeoutMs) || 5000, 500), 30000);
+
     await withTabLock(req.params.tabId, async () => {
-      const isVertical = direction === 'up' || direction === 'down';
-      const delta = (direction === 'up' || direction === 'left') ? -amount : amount;
-      await tabState.page.mouse.wheel(isVertical ? 0 : delta, isVertical ? delta : 0);
-      await tabState.page.waitForTimeout(300);
-    });
+      // 优先直接注入轻量级原生 JS 滚动，零网络等待、零渲染阻塞、毫秒级执行
+      try {
+        await tabState.page.evaluate(({ dx, dy }) => {
+          window.scrollBy({ left: dx, top: dy, behavior: 'instant' });
+        }, { dx, dy });
+      } catch {
+        // 兜底回退到 mouse.wheel
+        await tabState.page.mouse.wheel(dx, dy);
+      }
+      await tabState.page.waitForTimeout(100);
+    }, scrollTimeout);
     
     pluginEvents.emit('tab:scroll', { userId, tabId: req.params.tabId, direction, amount });
     res.json({ ok: true });
@@ -5061,6 +5080,13 @@ app.post('/tabs/:tabId/forward', async (req, res) => {
  *             properties:
  *               userId:
  *                 type: string
+ *               timeoutMs:
+ *                 type: integer
+ *                 description: >
+ *                   Max milliseconds to wait for the reload (default 15000, clamped to 1000-60000).
+ *                   Reloads wait for `domcontentloaded` (not full load), and an aborted or timed-out
+ *                   reload on streaming pages (e.g. NS_BINDING_ABORTED) falls back to an in-page
+ *                   `location.reload()` instead of returning HTTP 500.
  *     responses:
  *       200:
  *         description: Page refreshed.
@@ -5084,7 +5110,7 @@ app.post('/tabs/:tabId/refresh', async (req, res) => {
   const tabId = req.params.tabId;
   
   try {
-    const { userId } = req.body;
+    const { userId, timeoutMs = 15000 } = req.body;
     const session = sessions.get(normalizeUserId(userId));
     const found = session && findTab(session, tabId);
     if (!found) return tabNotFoundResponse(res, req.params.tabId || req.body?.tabId);
@@ -5093,11 +5119,24 @@ app.post('/tabs/:tabId/refresh', async (req, res) => {
     const { tabState } = found;
     tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
     
+    const reloadTimeout = Math.min(Math.max(Number(timeoutMs) || 15000, 1000), 60000);
     const result = await withTabLock(tabId, async () => {
-      await tabState.page.reload({ timeout: 30000 });
-      tabState.refs = await buildRefs(tabState.page);
+      try {
+        await tabState.page.reload({ timeout: reloadTimeout, waitUntil: 'domcontentloaded' });
+      } catch (reloadErr) {
+        // 在长连接/音视频流页面上，NS_BINDING_ABORTED 或超时极为常见。
+        // 若直接 reload 被中断，注入 location.reload() 进行轻量兜底，避免 500
+        const isAbortOrTimeout = /NS_BINDING_ABORTED|timeout/i.test(reloadErr.message);
+        if (isAbortOrTimeout) {
+          await tabState.page.evaluate(() => { location.reload(); }).catch(() => {});
+          await tabState.page.waitForTimeout(1000);
+        } else {
+          throw reloadErr;
+        }
+      }
+      tabState.refs = await buildRefs(tabState.page).catch(() => ({}));
       return { ok: true, url: tabState.page.url() };
-    });
+    }, reloadTimeout + 3000);
     
     res.json(result);
   } catch (err) {

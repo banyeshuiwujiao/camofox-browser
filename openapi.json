@@ -1296,11 +1296,15 @@
                   },
                   "direction": {
                     "type": "string",
-                    "description": "\"up\" or \"down\" (default \"down\")."
+                    "description": "\"up\", \"down\", \"left\", or \"right\" (default \"down\")."
                   },
                   "amount": {
                     "type": "integer",
                     "description": "Pixels to scroll."
+                  },
+                  "timeoutMs": {
+                    "type": "integer",
+                    "description": "Max milliseconds to wait for the scroll (default 5000, clamped to 500-30000). Scrolling is injected as native `window.scrollBy({behavior:\"instant\"})` so it never blocks on network idle — streaming/video pages that permanently hold long-lived connections no longer hang for 30s.\n"
                   }
                 }
               }
@@ -1650,6 +1654,10 @@
                 "properties": {
                   "userId": {
                     "type": "string"
+                  },
+                  "timeoutMs": {
+                    "type": "integer",
+                    "description": "Max milliseconds to wait for the reload (default 15000, clamped to 1000-60000). Reloads wait for `domcontentloaded` (not full load), and an aborted or timed-out reload on streaming pages (e.g. NS_BINDING_ABORTED) falls back to an in-page `location.reload()` instead of returning HTTP 500.\n"
                   }
                 }
               }
