@@ -131,12 +131,22 @@ async function ytDlpTranscript(reqId, url, videoId, lang, proxyUrl = null) {
   const cookieArgs = cookieFile ? ['--cookies', cookieFile] : (cookiesFromBrowser ? ['--cookies-from-browser', cookiesFromBrowser] : []);
 
   try {
-    const titleResult = await runYtDlp(
-      ytDlpPath,
-      [...proxyArgs, ...cookieArgs, '--skip-download', '--no-warnings', '--print', '%(title)s', normalizedUrl],
-      15000,
-    );
-    const title = titleResult.stdout.trim().split('\n')[0] || '';
+    // 标题只是元数据，拿不到不该拖垮整次请求：
+    //   - 超时放宽到 60s（实测冷启动 + YouTube 首包可达 28s，原来 15s 必超时，
+    //     超时后 execFile 只回 "Command failed: ... --print %(title)s ..."，
+    //     极易被误读成模板转义问题；实际 execFile 走数组传参不经过 shell，模板是安全的）
+    //   - 失败只降级为''，继续走字幕下载
+    let title = '';
+    try {
+      const titleResult = await runYtDlp(
+        ytDlpPath,
+        [...proxyArgs, ...cookieArgs, '--skip-download', '--no-warnings', '--print', '%(title)s', normalizedUrl],
+        60000,
+      );
+      title = titleResult.stdout.trim().split('\n')[0] || '';
+    } catch {
+      title = '';
+    }
 
     await runYtDlp(
       ytDlpPath,
@@ -154,7 +164,8 @@ async function ytDlpTranscript(reqId, url, videoId, lang, proxyUrl = null) {
         join(tmpDir, '%(id)s'),
         normalizedUrl,
       ],
-      30000,
+      // 字幕下载是第二次冷启动 + 一轮网络往返；30s 在慢网/首包抖动时会误判成"无字幕"
+      60000,
     );
 
     const files = await readdir(tmpDir);
