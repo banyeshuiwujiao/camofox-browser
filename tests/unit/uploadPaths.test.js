@@ -37,7 +37,7 @@ describe('resolveUploadPaths', () => {
       await fs.rm(outside, { recursive: true, force: true });
     }
   });
-  test('rejects empty, relative, and non-regular file paths', async () => {
+  test('rejects empty, relative, null byte, and non-regular file paths', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'camofox-uploads-'));
     try {
       const directory = path.join(root, 'directory');
@@ -46,6 +46,8 @@ describe('resolveUploadPaths', () => {
       await expect(resolveUploadPaths({ uploadsDir: root, filePaths: [''] }))
         .rejects.toMatchObject({ code: 'invalid_upload_path' });
       await expect(resolveUploadPaths({ uploadsDir: root, filePaths: ['relative.txt'] }))
+        .rejects.toMatchObject({ code: 'invalid_upload_path' });
+      await expect(resolveUploadPaths({ uploadsDir: root, filePaths: [path.join(root, 'file\0.txt')] }))
         .rejects.toMatchObject({ code: 'invalid_upload_path' });
       await expect(resolveUploadPaths({ uploadsDir: root, filePaths: [directory] }))
         .rejects.toMatchObject({ code: 'invalid_upload_path' });

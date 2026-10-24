@@ -75,6 +75,18 @@ describe('tab-logs', () => {
     expect(afterClear.total).toBe(0);
   });
 
+  test('clearing with types filter preserves other log levels', () => {
+    const { tabState, page } = makeMockTabState();
+    page.emit('console', { type: () => 'log', text: () => 'info message' });
+    page.emit('console', { type: () => 'error', text: () => 'error 1' });
+    page.emit('console', { type: () => 'error', text: () => 'error 2' });
+
+    const errors = getConsoleLogs(tabState, { types: 'error', clear: true });
+    expect(errors.count).toBe(2);
+    expect(tabState.consoleLogs).toHaveLength(1);
+    expect(tabState.consoleLogs[0].text).toBe('info message');
+  });
+
   test('clearConsoleLogs clears logs directly', () => {
     const { tabState, page } = makeMockTabState();
     page.emit('console', { type: () => 'log', text: () => 'test' });
@@ -172,6 +184,49 @@ describe('tab-network', () => {
     const failed = getNetworkRequests(tabState, { status: 'failed' });
     expect(failed.count).toBe(1);
     expect(failed.requests[0].url).toBe('https://x.com/api');
+  });
+
+  test('clearing with resourceTypes filter preserves other requests', () => {
+    const { tabState, page } = makeMockTabState();
+    const docReq = { url: () => 'https://x.com/index.html', method: () => 'GET', resourceType: () => 'document', headers: () => ({}) };
+    const xhrReq = { url: () => 'https://x.com/api/data', method: () => 'POST', resourceType: () => 'xhr', headers: () => ({}) };
+    page.emit('request', docReq);
+    page.emit('request', xhrReq);
+
+    const xhrs = getNetworkRequests(tabState, { resourceTypes: 'xhr', clear: true });
+    expect(xhrs.count).toBe(1);
+    expect(xhrs.requests[0].url).toBe('https://x.com/api/data');
+
+    expect(tabState.networkRequests).toHaveLength(1);
+    expect(tabState.networkRequests[0].url).toBe('https://x.com/index.html');
+  });
+
+  test('handles requestfinished before response safely without losing data', () => {
+    const { tabState, page } = makeMockTabState();
+    const mockReq = {
+      url: () => 'https://api.example.com/fast',
+      method: () => 'GET',
+      resourceType: () => 'fetch',
+      headers: () => ({}),
+      postData: () => null,
+    };
+    page.emit('request', mockReq);
+    // 乱序：requestfinished 先触发
+    page.emit('requestfinished', mockReq);
+    // response 稍后到达
+    page.emit('response', {
+      request: () => mockReq,
+      status: () => 204,
+      statusText: () => 'No Content',
+      ok: () => true,
+      headers: () => ({}),
+    });
+
+    const res = getNetworkRequests(tabState);
+    expect(res.count).toBe(1);
+    expect(res.requests[0].status).toBe(204);
+    expect(res.requests[0].ok).toBe(true);
+    expect(typeof res.requests[0].durationMs).toBe('number');
   });
 
   test('clearNetworkRequests clears requests directly', () => {

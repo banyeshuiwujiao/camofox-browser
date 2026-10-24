@@ -4298,54 +4298,53 @@ app.post('/tabs/:tabId/upload', async (req, res) => {
 
         // Arm the filechooser listener FIRST (catch a no-quotes rejection so an
         // unfired listener never crashes the handler), then activate the trigger.
+        const fcAbortController = new AbortController();
         const fcPromise = tabState.page
-          .waitForEvent('filechooser', { timeout: uploadTimeout })
+          .waitForEvent('filechooser', { timeout: uploadTimeout, signal: fcAbortController.signal })
           .catch(() => null);
         try {
-          await locator.focus({ timeout: UPLOAD_FOCUS_TIMEOUT_MS });
-          await tabState.page.keyboard.press('Enter');
-        } catch (e) {
-          try { await locator.click({ timeout: UPLOAD_CLICK_TIMEOUT_MS, force: true }); } catch (e2) { /* chooser/panel may still appear */ }
-        }
+          try {
+            await locator.focus({ timeout: UPLOAD_FOCUS_TIMEOUT_MS });
+            await tabState.page.keyboard.press('Enter');
+          } catch (e) {
+            try { await locator.click({ timeout: UPLOAD_CLICK_TIMEOUT_MS, force: true }); } catch (e2) { /* chooser/panel may still appear */ }
+          }
 
-        // The trigger may surface EITHER UI path (LinkedIn A/B-tests both, and
-        // its "Add media" control opens a native chooser AND mounts a hidden
-        // panel <input>). We must attach the file EXACTLY ONCE — attaching via
-        // both paths produces a duplicate ("1 of 2") image. So this is a
-        // PREFERENCE order, not a race:
-        //   1. Poll for an in-app <input type=file> and setInputFiles on it
-        //      (the reliable LinkedIn path -> via: panel_input).
-        //   2. Only if no panel input ever mounts, fall back to the native
-        //      chooser if it fired -> via: filechooser.
-        const panelWindow = Math.max(UPLOAD_PANEL_POLL_MS, uploadTimeout - UPLOAD_PANEL_MARGIN_MS);
-        const deadline = Date.now() + panelWindow;
-        while (!attachedVia && Date.now() < deadline) {
-          if (await trySetExistingInput()) { attachedVia = 'panel_input'; break; }
-          await tabState.page.waitForTimeout(UPLOAD_PANEL_POLL_MS);
-        }
-        if (!attachedVia) {
-          const fc = await fcPromise;
-          if (fc) {
-            try {
-              await fc.setFiles(paths);
-              attachedVia = 'filechooser';
-            } catch (e) {
-              log('info', 'upload: setFiles on filechooser failed', { error: e.message });
+          // The trigger may surface EITHER UI path (LinkedIn A/B-tests both, and
+          // its "Add media" control opens a native chooser AND mounts a hidden
+          // panel <input>). We must attach the file EXACTLY ONCE — attaching via
+          // both paths produces a duplicate ("1 of 2") image. So this is a
+          // PREFERENCE order, not a race:
+          //   1. Poll for an in-app <input type=file> and setInputFiles on it
+          //      (the reliable LinkedIn path -> via: panel_input).
+          //   2. Only if no panel input ever mounts, fall back to the native
+          //      chooser if it fired -> via: filechooser.
+          const panelWindow = Math.max(UPLOAD_PANEL_POLL_MS, uploadTimeout - UPLOAD_PANEL_MARGIN_MS);
+          const deadline = Date.now() + panelWindow;
+          while (!attachedVia && Date.now() < deadline) {
+            if (await trySetExistingInput()) { attachedVia = 'panel_input'; break; }
+            await tabState.page.waitForTimeout(UPLOAD_PANEL_POLL_MS);
+          }
+          if (!attachedVia) {
+            const fc = await fcPromise;
+            if (fc) {
+              try {
+                await fc.setFiles(paths);
+                attachedVia = 'filechooser';
+              } catch (e) {
+                log('info', 'upload: setFiles on filechooser failed', { error: e.message });
+              }
             }
           }
-        }
-        // If the panel path won, a native chooser may still have fired and be
-        // sitting on fcPromise. fcPromise is already .catch()'d to null so it
-        // can never reject; Playwright intercepts file choosers (no real OS
-        // dialog is left open), so an un-actioned chooser is harmless and needs
-        // no cancel() — which FileChooser doesn't expose in this PW version
-        // anyway. Nothing to do here; documented so nobody re-adds a second
-        // setFiles (that was the source of the duplicate-image bug).
 
-        if (!attachedVia) {
-          const err = new Error('Upload trigger did not open a file chooser or mount a file input.');
-          err.statusCode = 422;
-          throw err;
+          if (!attachedVia) {
+            const err = new Error('Upload trigger did not open a file chooser or mount a file input.');
+            err.statusCode = 422;
+            throw err;
+          }
+        } finally {
+          // If the panel path won or an error occurred, abort the filechooser listener so it doesn't leak or intercept later triggers
+          fcAbortController.abort();
         }
       }
 

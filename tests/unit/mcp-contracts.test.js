@@ -118,7 +118,9 @@ describe('buildRequest', () => {
     ['camofox_list_tabs', {}, { method: 'GET', path: '/tabs?userId=u1', auth: 'accessKey', kind: 'json' }],
     ['camofox_upload', { tabId: 't1', path: '/uploads/a.png' }, { method: 'POST', path: '/tabs/t1/upload', auth: 'accessKey', kind: 'json' }],
     ['camofox_get_console_logs', { tabId: 't1' }, { method: 'GET', path: '/tabs/t1/console?userId=u1', auth: 'accessKey', kind: 'json' }],
+    ['camofox_get_console_logs', { tabId: 't1', clear: true }, { method: 'GET', path: '/tabs/t1/console?userId=u1&clear=true', auth: 'accessKey', kind: 'json' }],
     ['camofox_get_network_requests', { tabId: 't1' }, { method: 'GET', path: '/tabs/t1/network?userId=u1', auth: 'accessKey', kind: 'json' }],
+    ['camofox_get_network_requests', { tabId: 't1', clear: true }, { method: 'GET', path: '/tabs/t1/network?userId=u1&clear=true', auth: 'accessKey', kind: 'json' }],
   ])('%s → %s %s (auth=%s)', (name, args, expected) => {
     const spec = buildRequest(name, args, CTX);
     expect(spec.method).toBe(expected.method);

@@ -399,7 +399,7 @@ export function buildRequest(name, args, ctx) {
       const params = new URLSearchParams({ userId });
       if (args.limit != null && args.limit !== '') params.set('limit', String(args.limit));
       if (args.types) params.set('types', String(args.types));
-      if (args.clear) params.set('clear', 'true');
+      if (args.clear === true || args.clear === 'true') params.set('clear', 'true');
       return {
         method: 'GET',
         path: `/tabs/${args.tabId}/console?${params}`,
@@ -412,7 +412,7 @@ export function buildRequest(name, args, ctx) {
       if (args.limit != null && args.limit !== '') params.set('limit', String(args.limit));
       if (args.resourceTypes) params.set('resourceTypes', String(args.resourceTypes));
       if (args.status != null && args.status !== '') params.set('status', String(args.status));
-      if (args.clear) params.set('clear', 'true');
+      if (args.clear === true || args.clear === 'true') params.set('clear', 'true');
       return {
         method: 'GET',
         path: `/tabs/${args.tabId}/network?${params}`,
