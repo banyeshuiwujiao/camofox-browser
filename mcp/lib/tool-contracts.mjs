@@ -220,6 +220,58 @@ export const TOOL_DEFS = [
       required: ['cookiesPath'],
     },
   },
+  {
+    name: 'camofox_upload',
+    description:
+      'Attach file(s) to a file input or trigger a file chooser in a Camoufox tab. ' +
+      'Accepts an absolute container-side file path or array of paths within CAMOFOX_UPLOADS_DIR.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'string', description: 'Tab identifier' },
+        path: {
+          description: 'Absolute path, or array of paths, within the configured upload directory',
+          oneOf: [
+            { type: 'string' },
+            { type: 'array', items: { type: 'string' } },
+          ],
+        },
+        ref: { type: 'string', description: 'Trigger element ref from snapshot (e.g. e1)' },
+        selector: { type: 'string', description: 'Trigger element CSS selector (alternative to ref)' },
+        timeout: { type: 'number', description: 'Overall wait budget in ms (default 12000)' },
+      },
+      required: ['tabId', 'path'],
+    },
+  },
+  {
+    name: 'camofox_get_console_logs',
+    description: 'Get captured console logs and unhandled errors for a Camoufox tab.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'string', description: 'Tab identifier' },
+        limit: { type: 'number', description: 'Maximum number of logs to return (default 100)' },
+        types: { type: 'string', description: 'Comma-separated log types to filter by (e.g. error,warn,log,info)' },
+        clear: { type: 'boolean', description: 'Clear logs after retrieval (default false)' },
+      },
+      required: ['tabId'],
+    },
+  },
+  {
+    name: 'camofox_get_network_requests',
+    description: 'Get captured HTTP network requests and responses for a Camoufox tab.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tabId: { type: 'string', description: 'Tab identifier' },
+        limit: { type: 'number', description: 'Maximum number of requests to return (default 100)' },
+        resourceTypes: { type: 'string', description: 'Comma-separated resource types (e.g. document,xhr,fetch,script,image)' },
+        status: { type: 'string', description: 'Filter by HTTP status code (e.g. 200, 404) or "failed"' },
+        clear: { type: 'boolean', description: 'Clear network requests after retrieval (default false)' },
+      },
+      required: ['tabId'],
+    },
+  },
 ];
 
 /** Quick name → def lookup. */
@@ -335,6 +387,39 @@ export function buildRequest(name, args, ctx) {
     case 'camofox_import_cookies':
       // Async (Netscape parse + path check) — caller must use buildCookieRequest().
       throw new Error('camofox_import_cookies requires buildCookieRequest() (async cookie parsing)');
+    case 'camofox_upload':
+      return {
+        method: 'POST',
+        path: `/tabs/${args.tabId}/upload`,
+        auth: 'accessKey',
+        responseKind: 'json',
+        body: { ...without(args), userId },
+      };
+    case 'camofox_get_console_logs': {
+      const params = new URLSearchParams({ userId });
+      if (args.limit != null && args.limit !== '') params.set('limit', String(args.limit));
+      if (args.types) params.set('types', String(args.types));
+      if (args.clear) params.set('clear', 'true');
+      return {
+        method: 'GET',
+        path: `/tabs/${args.tabId}/console?${params}`,
+        auth: 'accessKey',
+        responseKind: 'json',
+      };
+    }
+    case 'camofox_get_network_requests': {
+      const params = new URLSearchParams({ userId });
+      if (args.limit != null && args.limit !== '') params.set('limit', String(args.limit));
+      if (args.resourceTypes) params.set('resourceTypes', String(args.resourceTypes));
+      if (args.status != null && args.status !== '') params.set('status', String(args.status));
+      if (args.clear) params.set('clear', 'true');
+      return {
+        method: 'GET',
+        path: `/tabs/${args.tabId}/network?${params}`,
+        auth: 'accessKey',
+        responseKind: 'json',
+      };
+    }
     default:
       throw new Error(`Unknown tool: ${name}`);
   }

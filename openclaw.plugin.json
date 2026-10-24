@@ -126,7 +126,10 @@
       "camofox_close_tab",
       "camofox_evaluate",
       "camofox_list_tabs",
-      "camofox_import_cookies"
+      "camofox_import_cookies",
+      "camofox_upload",
+      "camofox_get_console_logs",
+      "camofox_get_network_requests"
     ]
   }
 }

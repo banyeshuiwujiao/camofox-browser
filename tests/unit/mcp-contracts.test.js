@@ -88,8 +88,8 @@ afterEach(() => {
 
 // --- Schema sanity ----------------------------------------------------------
 describe('TOOL_DEFS', () => {
-  test('exposes exactly 11 tools', () => {
-    expect(TOOL_DEFS).toHaveLength(11);
+  test('exposes exactly 14 tools', () => {
+    expect(TOOL_DEFS).toHaveLength(14);
   });
 
   test('every def has a unique name and a valid JSON-Schema object', () => {
@@ -116,6 +116,9 @@ describe('buildRequest', () => {
     ['camofox_close_tab', { tabId: 't1' }, { method: 'DELETE', path: '/tabs/t1?userId=u1', auth: 'accessKey', kind: 'json' }],
     ['camofox_evaluate', { tabId: 't1', expression: '1+1' }, { method: 'POST', path: '/tabs/t1/evaluate', auth: 'accessKey', kind: 'json' }],
     ['camofox_list_tabs', {}, { method: 'GET', path: '/tabs?userId=u1', auth: 'accessKey', kind: 'json' }],
+    ['camofox_upload', { tabId: 't1', path: '/uploads/a.png' }, { method: 'POST', path: '/tabs/t1/upload', auth: 'accessKey', kind: 'json' }],
+    ['camofox_get_console_logs', { tabId: 't1' }, { method: 'GET', path: '/tabs/t1/console?userId=u1', auth: 'accessKey', kind: 'json' }],
+    ['camofox_get_network_requests', { tabId: 't1' }, { method: 'GET', path: '/tabs/t1/network?userId=u1', auth: 'accessKey', kind: 'json' }],
   ])('%s → %s %s (auth=%s)', (name, args, expected) => {
     const spec = buildRequest(name, args, CTX);
     expect(spec.method).toBe(expected.method);

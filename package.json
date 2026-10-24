@@ -114,6 +114,18 @@
       {
         "name": "camofox_import_cookies",
         "description": "Import Netscape cookie file (requires CAMOFOX_API_KEY)"
+      },
+      {
+        "name": "camofox_upload",
+        "description": "Attach file(s) to a file input or trigger a file chooser in a tab"
+      },
+      {
+        "name": "camofox_get_console_logs",
+        "description": "Get captured console logs and errors for a tab"
+      },
+      {
+        "name": "camofox_get_network_requests",
+        "description": "Get captured HTTP network requests and responses for a tab"
       }
     ]
   },

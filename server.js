@@ -48,6 +48,8 @@ import { visibleSelectorCandidate } from './lib/visible-selector.js';
 import { normalizeBrowserKey } from './lib/browser-key.js';
 import { createPageWithSessionRecovery } from './lib/new-page-recovery.js';
 import { resolveUploadPaths } from './lib/upload-paths.js';
+import { attachConsoleTracker, getConsoleLogs, clearConsoleLogs } from './lib/tab-logs.js';
+import { attachNetworkTracker, getNetworkRequests, clearNetworkRequests } from './lib/tab-network.js';
 import { acquirePageLease, hasActivePageLeases, isPageLeased, releasePageLease, setLeasedPage } from './lib/page-lease.js';
 import { createReporter, createTabHealthTracker, collectResourceSnapshot, classifyProxyError, browserProcessTreeRssMb, browserProcessNameRssMb } from './lib/reporter.js';
 import { mountDocs } from './lib/openapi.js';
@@ -1864,6 +1866,8 @@ function createTabState(page, options = {}) {
   };
   page?.on?.('crash', () => { tabState.crashed = true; });
   attachNavigationResponseTracker(tabState);
+  attachConsoleTracker(tabState);
+  attachNetworkTracker(tabState);
   return tabState;
 }
 
@@ -5548,6 +5552,332 @@ app.get('/tabs/:tabId/stats', async (req, res) => {
     });
   } catch (err) {
     log('error', 'stats failed', { reqId: req.reqId, error: err.message });
+    handleRouteError(err, req, res);
+  }
+});
+
+// Get console logs for a tab
+/**
+ * @openapi
+ * /tabs/{tabId}/console:
+ *   get:
+ *     tags: [Content]
+ *     summary: Get console logs for a tab
+ *     description: Returns captured console messages and unhandled errors for the tab.
+ *     parameters:
+ *       - name: tabId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: userId
+ *         in: query
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: limit
+ *         in: query
+ *         schema:
+ *           type: integer
+ *           default: 100
+ *         description: Maximum number of logs to return.
+ *       - name: types
+ *         in: query
+ *         schema:
+ *           type: string
+ *         description: Comma-separated list of log types to filter by (e.g. error,warn,log,info).
+ *       - name: clear
+ *         in: query
+ *         schema:
+ *           type: boolean
+ *           default: false
+ *         description: Clear logs after reading.
+ *     responses:
+ *       200:
+ *         description: Console logs list.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 tabId:
+ *                   type: string
+ *                 logs:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       type:
+ *                         type: string
+ *                       text:
+ *                         type: string
+ *                       location:
+ *                         type: object
+ *                       timestamp:
+ *                         type: integer
+ *                 count:
+ *                   type: integer
+ *                 total:
+ *                   type: integer
+ *       400:
+ *         description: Missing userId.
+ *       404:
+ *         description: Tab not found.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+app.get('/tabs/:tabId/console', async (req, res) => {
+  try {
+    const userId = req.query.userId;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+    const session = sessions.get(normalizeUserId(userId));
+    const found = session && findTab(session, req.params.tabId);
+    if (!found) return tabNotFoundResponse(res, req.params.tabId);
+    session.lastAccess = Date.now();
+
+    const { tabState } = found;
+    const limit = req.query.limit ? parseInt(req.query.limit, 10) : 100;
+    const types = req.query.types;
+    const clear = req.query.clear === 'true' || req.query.clear === true;
+
+    const result = getConsoleLogs(tabState, { limit, types, clear });
+    res.json({
+      tabId: req.params.tabId,
+      ...result,
+    });
+  } catch (err) {
+    log('error', 'get console logs failed', { reqId: req.reqId, error: err.message });
+    handleRouteError(err, req, res);
+  }
+});
+
+// Clear console logs for a tab
+/**
+ * @openapi
+ * /tabs/{tabId}/console:
+ *   delete:
+ *     tags: [Content]
+ *     summary: Clear console logs for a tab
+ *     description: Clears all captured console messages for the tab.
+ *     parameters:
+ *       - name: tabId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: userId
+ *         in: query
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Console logs cleared.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok:
+ *                   type: boolean
+ *                 cleared:
+ *                   type: integer
+ *       400:
+ *         description: Missing userId.
+ *       404:
+ *         description: Tab not found.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+app.delete('/tabs/:tabId/console', async (req, res) => {
+  try {
+    const userId = req.query.userId || req.body?.userId;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+    const session = sessions.get(normalizeUserId(userId));
+    const found = session && findTab(session, req.params.tabId);
+    if (!found) return tabNotFoundResponse(res, req.params.tabId);
+    session.lastAccess = Date.now();
+
+    const cleared = clearConsoleLogs(found.tabState);
+    res.json({ ok: true, cleared });
+  } catch (err) {
+    log('error', 'clear console logs failed', { reqId: req.reqId, error: err.message });
+    handleRouteError(err, req, res);
+  }
+});
+
+// Get network requests for a tab
+/**
+ * @openapi
+ * /tabs/{tabId}/network:
+ *   get:
+ *     tags: [Content]
+ *     summary: Get network requests for a tab
+ *     description: Returns captured HTTP requests and responses for the tab.
+ *     parameters:
+ *       - name: tabId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: userId
+ *         in: query
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: limit
+ *         in: query
+ *         schema:
+ *           type: integer
+ *           default: 100
+ *         description: Maximum number of network requests to return.
+ *       - name: resourceTypes
+ *         in: query
+ *         schema:
+ *           type: string
+ *         description: Comma-separated list of resource types (e.g. document,xhr,fetch,script,stylesheet,image).
+ *       - name: status
+ *         in: query
+ *         schema:
+ *           type: string
+ *         description: Filter by status code (e.g. 200, 404) or "failed".
+ *       - name: clear
+ *         in: query
+ *         schema:
+ *           type: boolean
+ *           default: false
+ *         description: Clear network requests after reading.
+ *     responses:
+ *       200:
+ *         description: Network requests list.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 tabId:
+ *                   type: string
+ *                 requests:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: string
+ *                       url:
+ *                         type: string
+ *                       method:
+ *                         type: string
+ *                       resourceType:
+ *                         type: string
+ *                       status:
+ *                         type: integer
+ *                       statusText:
+ *                         type: string
+ *                       ok:
+ *                         type: boolean
+ *                       durationMs:
+ *                         type: integer
+ *                       failure:
+ *                         type: string
+ *                       timestamp:
+ *                         type: integer
+ *                 count:
+ *                   type: integer
+ *                 total:
+ *                   type: integer
+ *       400:
+ *         description: Missing userId.
+ *       404:
+ *         description: Tab not found.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+app.get('/tabs/:tabId/network', async (req, res) => {
+  try {
+    const userId = req.query.userId;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+    const session = sessions.get(normalizeUserId(userId));
+    const found = session && findTab(session, req.params.tabId);
+    if (!found) return tabNotFoundResponse(res, req.params.tabId);
+    session.lastAccess = Date.now();
+
+    const { tabState } = found;
+    const limit = req.query.limit ? parseInt(req.query.limit, 10) : 100;
+    const resourceTypes = req.query.resourceTypes;
+    const status = req.query.status;
+    const clear = req.query.clear === 'true' || req.query.clear === true;
+
+    const result = getNetworkRequests(tabState, { limit, resourceTypes, status, clear });
+    res.json({
+      tabId: req.params.tabId,
+      ...result,
+    });
+  } catch (err) {
+    log('error', 'get network requests failed', { reqId: req.reqId, error: err.message });
+    handleRouteError(err, req, res);
+  }
+});
+
+// Clear network requests for a tab
+/**
+ * @openapi
+ * /tabs/{tabId}/network:
+ *   delete:
+ *     tags: [Content]
+ *     summary: Clear network requests for a tab
+ *     description: Clears all captured network requests for the tab.
+ *     parameters:
+ *       - name: tabId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: userId
+ *         in: query
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Network requests cleared.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok:
+ *                   type: boolean
+ *                 cleared:
+ *                   type: integer
+ *       400:
+ *         description: Missing userId.
+ *       404:
+ *         description: Tab not found.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+app.delete('/tabs/:tabId/network', async (req, res) => {
+  try {
+    const userId = req.query.userId || req.body?.userId;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+    const session = sessions.get(normalizeUserId(userId));
+    const found = session && findTab(session, req.params.tabId);
+    if (!found) return tabNotFoundResponse(res, req.params.tabId);
+    session.lastAccess = Date.now();
+
+    const cleared = clearNetworkRequests(found.tabState);
+    res.json({ ok: true, cleared });
+  } catch (err) {
+    log('error', 'clear network requests failed', { reqId: req.reqId, error: err.message });
     handleRouteError(err, req, res);
   }
 });
