@@ -612,6 +612,28 @@ function withTimeout(promise, ms, label) {
   ]);
 }
 
+/**
+ * Wait until a session is no longer mid-teardown/rebuild for this user.
+ * The tab/create race is: reaper marks the session `_closing`, closes the
+ * context, then deletes it. A request landing in that window sees a dead
+ * context. Rather than a hard 500, callers can wait for the slot to clear and
+ * retry (the next getSession() builds a fresh context).
+ * Resolves when the user has no session, or has a healthy one.
+ */
+async function waitForSessionReady(userId, { timeoutMs = 15000, intervalMs = 250 } = {}) {
+  const key = normalizeUserId(userId);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const session = sessions.get(key);
+    if (!session) return true;               // slot free -> next call creates fresh
+    if (!session._closing) {
+      try { session.context.pages(); return true; } catch { /* dead, keep waiting */ }
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return false;
+}
+
 function requestTimeoutMs(baseMs = HANDLER_TIMEOUT_MS) {
   return proxyPool?.canRotateSessions ? Math.max(baseMs, 180000) : baseMs;
 }
@@ -2988,7 +3010,7 @@ app.post('/pressure/cleanup', async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-app.post('/tabs', async (req, res) => {
+app.post('/tabs', async function createTabRoute(req, res) {
   // The tab is registered before it navigates, and the route deadline can pass
   // while navigation is still in flight. An error response carries no tabId, so
   // the catch below attempts to discard any registered tab, and a registration
@@ -3001,6 +3023,12 @@ app.post('/tabs', async (req, res) => {
     if (session) await destroyTimedOutTab(session, createdTabId, 'tab_create_failed', req.body.userId);
     createdTabId = null;
   };
+  setTimeout(() => {
+    abandoned = true;
+    // No tab registered yet -> nothing will call discardCreatedTab for us.
+    if (!createdTabId) res.status(503).json({ error: 'tab create timed out', code: 'tab_create_timeout', retryable: true });
+  }, tabCreateRequestTimeoutMs()).unref?.();
+
   try {
     const { userId, sessionKey, listItemId, url, trace } = req.body;
     // Accept both sessionKey (preferred) and listItemId (legacy) for backward compatibility
@@ -3167,12 +3195,29 @@ app.post('/tabs', async (req, res) => {
 
     res.json(result);
   } catch (err) {
+    // Session teardown/rebuild in flight (idle reaper, tab reaper, UA change,
+    // proxy rotation): the next request gets a fresh context anyway. Wait for
+    // the rebuild and retry once, instead of surfacing a 500 for a race the
+    // caller cannot see or fix.
+    if (isDeadContextError(err) && !req._camofoxRetried) {
+      req._camofoxRetried = true;
+      log('warn', 'tab create hit a dead/rebuilding session; waiting then retrying once', {
+        reqId: req.reqId, userId: req.body?.userId, error: err.message,
+      });
+      await waitForSessionReady(req.body?.userId, { timeoutMs: 15000 }).catch(() => {});
+      return createTabRoute(req, res);
+    }
     log('error', 'tab create failed', { reqId: req.reqId, error: err.message });
     abandoned = true;
     try {
       await discardCreatedTab();
     } catch (cleanupErr) {
       log('warn', 'tab create cleanup failed', { reqId: req.reqId, tabId: createdTabId, error: cleanupErr?.message ?? String(cleanupErr) });
+    }
+    // Route deadline (withTimeout) elapsed before a tab existed: answer with a
+    // retryable 503 instead of a 500 — the client can safely retry.
+    if (isTimeoutError(err) && !createdTabId) {
+      return res.status(503).json({ error: 'tab create timed out', code: 'tab_create_timeout', retryable: true });
     }
     // SSL certificate errors on initial navigation — non-retriable
     const isSslError = err.message && (
@@ -6588,6 +6633,65 @@ app.delete('/sessions/:userId/traces/:filename', authMiddleware(), async (req, r
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
+/**
+ * @openapi
+ * /sessions/{userId}:
+ *   get:
+ *     tags: [Sessions]
+ *     summary: Inspect a user session
+ *     description: >-
+ *       Returns the session's user agent and open tab count so callers can see
+ *       why a tab request would hit `409 user_agent_mismatch`, instead of
+ *       inferring it from the error. `exists: false` means no live session
+ *       (the next tab request creates a fresh one with the requested UA).
+ *     parameters:
+ *       - name: userId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Session state.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 userId:
+ *                   type: string
+ *                 exists:
+ *                   type: boolean
+ *                 userAgent:
+ *                   type: string
+ *                   nullable: true
+ *                   description: The UA baked into the session's BrowserContext ("" for the default Firefox UA).
+ *                 tabCount:
+ *                   type: integer
+ *                 closing:
+ *                   type: boolean
+ *                   description: True while the session is being torn down/rebuilt.
+ */
+app.get('/sessions/:userId', async (req, res) => {
+  try {
+    const userId = normalizeUserId(req.params.userId);
+    const session = sessions.get(userId);
+    if (!session) {
+      return res.json({ userId, exists: false, userAgent: null, tabCount: 0, closing: false });
+    }
+    res.json({
+      userId,
+      exists: true,
+      userAgent: session.userAgent || '',
+      tabCount: countSessionTabs(session),
+      closing: Boolean(session._closing),
+    });
+  } catch (err) {
+    log('error', 'session inspect failed', { error: err.message });
+    handleRouteError(err, req, res);
+  }
+});
+
 app.delete('/sessions/:userId', async (req, res) => {
   try {
     const userId = normalizeUserId(req.params.userId);

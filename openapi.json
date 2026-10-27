@@ -3132,6 +3132,55 @@
             }
           }
         }
+      },
+      "get": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Inspect a user session",
+        "description": "Returns the session's user agent and open tab count so callers can see why a tab request would hit `409 user_agent_mismatch`, instead of inferring it from the error. `exists: false` means no live session (the next tab request creates a fresh one with the requested UA).",
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "userId": {
+                      "type": "string"
+                    },
+                    "exists": {
+                      "type": "boolean"
+                    },
+                    "userAgent": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "The UA baked into the session's BrowserContext (\"\" for the default Firefox UA)."
+                    },
+                    "tabCount": {
+                      "type": "integer"
+                    },
+                    "closing": {
+                      "type": "boolean",
+                      "description": "True while the session is being torn down/rebuilt."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/": {

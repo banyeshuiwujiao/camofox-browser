@@ -38,7 +38,8 @@ describe('search fallbacks', () => {
 
   test('keeps the Google fallback path for upstream 5xx responses', () => {
     expect(serverSource).toContain("isGoogleSearch && navErr.code === 'destination_unavailable' && await navigateSearchFallback()");
-    expect(serverSource).toContain('if (response && response.status() >= 500) {\n              tabState.lastSnapshot = null;\n              throw Object.assign(');
+    // 只断言语义；不绑定换行/缩进（Windows 检出为 CRLF，逐字比较会误报）
+    expect(serverSource).toMatch(/if \(response && response\.status\(\) >= 500\) \{\s+tabState\.lastSnapshot = null;\s+throw Object\.assign\(/);
   });
 
   test('navigation reports the engine used after Google fallback', () => {

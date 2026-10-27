@@ -30,11 +30,18 @@ describe('timed-out tab operations', () => {
 
   test('allows tab creation to finish its one-session recovery', () => {
     const source = readFileSync(new URL('../../server.js', import.meta.url), 'utf8');
-    const createRoute = source.slice(source.indexOf("app.post('/tabs', async (req, res) => {"), source.indexOf('// Navigate', source.indexOf("app.post('/tabs', async (req, res) => {")));
+    const createStart = source.indexOf("app.post('/tabs', async function createTabRoute");
+    const createRoute = source.slice(createStart, source.indexOf('// Navigate', createStart));
 
     expect(source).toContain('function tabCreateRequestTimeoutMs()');
     expect(source).toContain('return Math.max(requestTimeoutMs(), (NEW_PAGE_TIMEOUT_MS * 2) + 5000);');
-    expect(createRoute).toContain("})(), tabCreateRequestTimeoutMs(), 'tab create');");
+    // 预算必须由该函数给出；允许换行/缩进差异
+    expect(createRoute).toMatch(/\}\)\(\)\s*,\s*tabCreateRequestTimeoutMs\(\)\s*,\s*'tab create'\s*\)/);
+    // 超时是可恢复错误（503 + retry 提示），不是裸 500
+    expect(createRoute).toContain("code: 'tab_create_timeout'");
+    // 会话正在重建时等待后重试一次，而不是直接失败
+    expect(source).toContain('async function waitForSessionReady(');
+    expect(createRoute).toMatch(/isDeadContextError\(err\)\s*&&\s*!req\._camofoxRetried/);
   });
 
   test('returns a stable recoverable error after timeout cleanup', () => {

@@ -5,6 +5,8 @@ import {
   chromeUserAgent,
   countSessionTabs,
   resolveUserAgent,
+  userAgentFamily,
+  userAgentMismatchMessage,
   validateUserAgent,
 } from '../../lib/user-agent.js';
 
@@ -72,5 +74,28 @@ describe('countSessionTabs', () => {
     expect(countSessionTabs({ tabGroups: new Map([['g', new Map()]]) })).toBe(0);
     expect(countSessionTabs(null)).toBe(0);
     expect(countSessionTabs({})).toBe(0);
+  });
+});
+
+describe('userAgentFamily', () => {
+  test('treats empty/unspecified as the default Firefox family', () => {
+    expect(userAgentFamily('')).toBe('firefox');
+    expect(userAgentFamily(null)).toBe('firefox');
+    expect(userAgentFamily('Mozilla/5.0 (Windows NT 10.0; rv:152.0) Gecko/20100101 Firefox/152.0')).toBe('firefox');
+  });
+
+  test('detects Chrome-family UAs (so a version-only difference is not a mismatch)', () => {
+    expect(userAgentFamily('Mozilla/5.0 Chrome/141.0.0.0 Safari/537.36')).toBe('chrome');
+    expect(userAgentFamily('Mozilla/5.0 Chrome/142.0.0.0 Safari/537.36')).toBe('chrome');
+    expect(userAgentFamily(chromeUserAgent())).toBe('chrome');
+  });
+});
+
+describe('userAgentMismatchMessage', () => {
+  test('explains the tab count and how to recover', () => {
+    const msg = userAgentMismatchMessage('dsh', 2);
+    expect(msg).toContain('2 open tab');
+    expect(msg).toContain('DELETE /sessions/dsh');
+    expect(msg).toContain('userAgent');
   });
 });

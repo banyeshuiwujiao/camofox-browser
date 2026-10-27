@@ -743,6 +743,16 @@ Rules of the road:
    `sessionKey`/`userId` via the request field instead of the global config.
 4. **Still Firefox.** The engine, TLS stack, and the rest of the fingerprint are
    unchanged; this is a UA-level compatibility shim, not browser emulation.
+5. **Only works on sites that read the UA string alone.** The override changes
+   `navigator.userAgent` (and the HTTP header); Playwright also derives
+   `navigator.appVersion` from it. But these stay in Firefox shape and are
+   **not** shimmed: `navigator.userAgentData` (Client Hints, absent in Firefox),
+   `window.chrome`, the Gecko-specific JS shape, and the engine itself. So a
+   site that checks Client Hints / `window.chrome` / UA-vs-engine consistency
+   will still see Firefox and can still reject it. Verified against Polyv
+   (reads only `navigator.userAgent`): 华医网 goes from `#024` to a playing
+   stream. If a site rejects on `userAgentData`, this override will not help —
+   use a real Chromium browser for that site instead.
 
 ## Architecture
 
