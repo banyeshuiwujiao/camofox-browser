@@ -1,4 +1,5 @@
 import path from 'path';
+import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { launchServer } from '../../lib/launcher.js';
 import { loadConfig } from '../../lib/config.js';
@@ -8,8 +9,32 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let serverProcess = null;
 let serverPort = null;
 
-async function waitForServer(port, maxRetries = 30, interval = 1000) {
+/**
+ * Ask the OS for a free ephemeral port.
+ *
+ * Picking a random port in a fixed range is not safe on Windows: Hyper-V/WSL
+ * reserves blocks (e.g. 3389 for RDP) where listen() fails with EACCES, so a
+ * random 3100-3999 draw intermittently kills the suite with
+ * "Server failed to start ... after 30 attempts". Letting the kernel choose
+ * avoids the whole class of collisions.
+ */
+function findFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+async function waitForServer(port, maxRetries = 30, interval = 1000, isDead = () => false) {
   for (let i = 0; i < maxRetries; i++) {
+    // The child can die before it ever listens (EACCES/EADDRINUSE). Detect that
+    // immediately instead of burning the full 30s waiting for a corpse.
+    if (isDead()) throw new Error(`Server exited before listening on port ${port}`);
     try {
       const response = await fetch(`http://localhost:${port}/health`);
       if (response.ok) {
@@ -24,7 +49,7 @@ async function waitForServer(port, maxRetries = 30, interval = 1000) {
 }
 
 async function startServer(port = 0, extraEnv = {}) {
-  const usePort = port || Math.floor(3100 + Math.random() * 900);
+  const usePort = port || await findFreePort();
   const cfg = loadConfig();
   const pluginDir = path.join(__dirname, '../..');
 
@@ -40,13 +65,16 @@ async function startServer(port = 0, extraEnv = {}) {
     log,
   });
 
+  let dead = false;
   serverProcess.on('error', (err) => {
+    dead = true;
     console.error('Failed to start server:', err);
   });
+  serverProcess.on('exit', () => { dead = true; });
 
   serverPort = usePort;
 
-  await waitForServer(usePort);
+  await waitForServer(usePort, 30, 1000, () => dead);
 
   console.log(`camofox-browser server started on port ${usePort}`);
   return usePort;
