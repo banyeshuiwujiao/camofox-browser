@@ -758,8 +758,11 @@ Rules of the road:
 4. **Still Firefox.** The engine, TLS stack, and the rest of the fingerprint are
    unchanged; this is a UA-level compatibility shim, not browser emulation.
 5. **Only works on sites that read the UA string alone.** The override changes
-   `navigator.userAgent` (and the HTTP header); Playwright also derives
-   `navigator.appVersion` from it. But these stay in Firefox shape and are
+   `navigator.userAgent` (and the HTTP header). `navigator.appVersion` is derived
+   from it but is *not* Chrome-shaped: Firefox truncates it, so a Chrome UA still
+   reports `appVersion == "5.0 (Windows)"`, whereas real Chrome reports the full
+   `5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ... Chrome/142 ...` string.
+   These stay in Firefox shape and are
    **not** shimmed: `navigator.userAgentData` (Client Hints, absent in Firefox),
    `window.chrome`, the Gecko-specific JS shape, and the engine itself. So a
    site that checks Client Hints / `window.chrome` / UA-vs-engine consistency
