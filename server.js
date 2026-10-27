@@ -10,6 +10,7 @@ import { getSearchFallbacks } from './lib/search-fallbacks.js';
 import { hasGoogleOrganicResults } from './lib/google-serp.js';
 import { loadConfig } from './lib/config.js';
 import { contextIdentityOptions, launchLocale } from './lib/browser-identity.js';
+import { resolveUserAgent, countSessionTabs, userAgentFamily, userAgentMismatchMessage } from './lib/user-agent.js';
 import { normalizePlaywrightProxy, createProxyPool, buildProxyUrl } from './lib/proxy.js';
 import { createFlyHelpers } from './lib/fly.js';
 import { createPluginEvents, loadPlugins, typeEventPayload } from './lib/plugins.js';
@@ -1362,8 +1363,9 @@ async function closeAllSessions(reason, { clearDownloads = true, clearLocks = tr
   }
 }
 
-async function getSession(userId, { trace = false } = {}) {
+async function getSession(userId, { trace = false, userAgent = null } = {}) {
   const key = normalizeUserId(userId);
+  const effectiveUserAgent = userAgent || CONFIG.userAgent || '';
   let session = sessions.get(key);
   
   // Check if existing session's context is still alive
@@ -1411,6 +1413,9 @@ async function getSession(userId, { trace = false } = {}) {
       const b = await ensureBrowser();
       const contextOptions = {
         viewport: null,
+        // When known up front, Playwright rewrites both the HTTP User-Agent header
+        // and the navigator.userAgent seen by page scripts for this context.
+        ...(effectiveUserAgent ? { userAgent: effectiveUserAgent } : {}),
         ...contextIdentityOptions({
           hasProxy: !!proxyPool,
           directIdentity: CONFIG.directIdentity,
@@ -1442,7 +1447,7 @@ async function getSession(userId, { trace = false } = {}) {
         }
       }
 
-      const created = { context, tabGroups: new Map(), pageLeases: new Set(), lastAccess: Date.now(), proxySessionId: sessionProxy?.sessionId || null, tracePath };
+      const created = { context, tabGroups: new Map(), pageLeases: new Set(), lastAccess: Date.now(), proxySessionId: sessionProxy?.sessionId || null, tracePath, userAgent: effectiveUserAgent || '' };
       sessions.set(key, created);
       await pluginEvents.emitAsync('session:created', { userId: key, context });
       log('info', 'session created', {
@@ -2933,6 +2938,16 @@ app.post('/pressure/cleanup', async (req, res) => {
  *               trace:
  *                 type: boolean
  *                 description: Enable Playwright tracing for this session (screenshots, DOM snapshots, network). Must be set on first tab creation; cannot be added to an existing session.
+ *               userAgent:
+ *                 type: string
+ *                 description: >-
+ *                   Override the session's user agent. Use "chrome" for a Chrome UA matching the
+ *                   host platform, or pass a full UA string. Needed for sites that hard-block
+ *                   Firefox (e.g. Polyv-based players reject Firefox with #024). Fixes both the
+ *                   HTTP header and navigator.userAgent, and applies to the whole user session
+ *                   (popups included). Must be set when the session is created; an empty session
+ *                   is recreated automatically, a session with open tabs returns 409. Defaults to
+ *                   CAMOFOX_USER_AGENT.
  *     responses:
  *       200:
  *         description: Tab created.
@@ -2965,7 +2980,9 @@ app.post('/pressure/cleanup', async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  *       409:
- *         description: Cannot enable tracing on an existing session.
+ *         description: >-
+ *           Cannot enable tracing on an existing session, or the session was created with a
+ *           different userAgent and still has open tabs (delete the session first).
  *         content:
  *           application/json:
  *             schema:
@@ -2992,6 +3009,16 @@ app.post('/tabs', async (req, res) => {
       return res.status(400).json({ error: 'userId and sessionKey required' });
     }
 
+    // Per-session UA override, for sites that hard-block Firefox. "chrome"
+    // expands to a Chrome UA for the host platform; any other string is used
+    // verbatim. Applies to every page in the user's session (popups included).
+    let userAgent = null;
+    try {
+      userAgent = resolveUserAgent(req.body.userAgent);
+    } catch (err) {
+      return res.status(400).json({ error: err.message, code: 'invalid_user_agent' });
+    }
+
     // Session overflow redirect (Fly.io only) — if this machine is above its
     // fair share of sessions and the user doesn't already have one here,
     // bounce back through the Fly Proxy to land on a less-loaded machine.
@@ -3016,7 +3043,31 @@ app.post('/tabs', async (req, res) => {
           { statusCode: 409 },
         );
       }
-      let session = await getSession(userId, { trace: !!trace });
+      let session = await getSession(userId, { trace: !!trace, userAgent });
+      // The UA has to be baked into the BrowserContext, so a session that was
+      // created without one cannot be patched in place (Camoufox runs
+      // automation scripts in an isolated world; addInitScript never reaches
+      // page globals). Recreate an empty session, never silently drop tabs.
+      if (userAgent && session.userAgent !== userAgent) {
+        // A hand-written UA string can differ only by version/whitespace while
+        // still being the same engine family; don't tear the session down then.
+        const differentFamily = userAgentFamily(session.userAgent) !== userAgentFamily(userAgent);
+        if (differentFamily) {
+          const sessionTabs = countSessionTabs(session);
+          if (sessionTabs > 0) {
+            throw Object.assign(
+              new Error(userAgentMismatchMessage(userId, sessionTabs)),
+              { statusCode: 409, code: 'user_agent_mismatch' },
+            );
+          }
+          await destroySession(userId, { reason: 'user_agent_change' });
+          session = await getSession(userId, { trace: !!trace, userAgent });
+          log('info', 'session recreated for user agent override', {
+            userId: normalizeUserId(userId),
+            userAgent,
+          });
+        }
+      }
       
       let totalTabs = 0;
       for (const group of session.tabGroups.values()) totalTabs += group.size;

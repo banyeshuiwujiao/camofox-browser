@@ -437,6 +437,10 @@
                   "trace": {
                     "type": "boolean",
                     "description": "Enable Playwright tracing for this session (screenshots, DOM snapshots, network). Must be set on first tab creation; cannot be added to an existing session."
+                  },
+                  "userAgent": {
+                    "type": "string",
+                    "description": "Override the session's user agent. Use \"chrome\" for a Chrome UA matching the host platform, or pass a full UA string. Needed for sites that hard-block Firefox (e.g. Polyv-based players reject Firefox with #024). Fixes both the HTTP header and navigator.userAgent, and applies to the whole user session (popups included). Must be set when the session is created; an empty session is recreated automatically, a session with open tabs returns 409. Defaults to CAMOFOX_USER_AGENT."
                   }
                 }
               }
@@ -482,7 +486,7 @@
             }
           },
           "409": {
-            "description": "Cannot enable tracing on an existing session.",
+            "description": "Cannot enable tracing on an existing session, or the session was created with a different userAgent and still has open tabs (delete the session first).",
             "content": {
               "application/json": {
                 "schema": {

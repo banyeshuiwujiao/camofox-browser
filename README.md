@@ -640,6 +640,7 @@ Browser behavior can be tuned in `camofox.config.json`:
 | `CAMOFOX_EVALUATE_MAX_BODY_SIZE` | Max JSON request body size for `POST /tabs/:tabId/evaluate`; other JSON routes remain limited to `100kb`. | `1mb` |
 | `CAMOFOX_LOCALE` | Locale for an explicitly configured direct-session identity. Must be set with `CAMOFOX_TIMEZONE`. | - |
 | `CAMOFOX_TIMEZONE` | IANA timezone for an explicitly configured direct-session identity. Must be set with `CAMOFOX_LOCALE`. | - |
+| `CAMOFOX_USER_AGENT` | Default user agent for **every** session. `chrome` expands to a desktop Chrome UA for the host platform; any other value is used verbatim. ⚠️ Leave unset unless required: a Chrome UA on a Firefox engine is a fingerprint mismatch that *lowers* anti-detection. Prefer the per-request `userAgent` field for one session only (see [User-Agent override](#user-agent-override)). | - |
 | `CAMOUFOX_EXECUTABLE` | External Camoufox executable to use instead of downloading/launching the bundled cache. Must point to a Camoufox bundle with sibling resources. | - |
 | `CAMOUFOX_EXECUTABLE_PATH` | Compatibility alias for `CAMOUFOX_EXECUTABLE` | - |
 | `CAMOFOX_EXECUTABLE_PATH` | Compatibility alias for `CAMOUFOX_EXECUTABLE` | - |
@@ -697,6 +698,51 @@ Or set the same preference in `camofox.config.json` and restart the server:
 ```
 
 The environment variable overrides the file setting. Set `CAMOFOX_INTERACTIVE=off` to return to normal headless behavior. This mode is intended for a person using the same machine; it does not expose a remote browser-control service.
+
+## User-Agent override
+
+> **Default advice: don't use it.** Camoufox's anti-detection is built on being a
+> *consistent* Firefox. Putting a Chrome UA on a Firefox engine is itself a
+> fingerprint mismatch (UA says Chrome, engine is Gecko), so it makes you *more*
+> detectable on sites that inspect more than the UA string. Only turn it on for
+> the specific session that hits a site hard-blocking Firefox, and leave every
+> other session on the default Firefox UA.
+
+Camoufox reports a Firefox user agent by design. Some sites hard-block Firefox,
+though, and there the player never gets a chance to load. Polyv's vod-player is
+one example -- its `forbidClients` gate rejects Firefox >= 68 and renders
+`#024 此视频不支持在本浏览器上播放` before any media request is made.
+
+Opt a session into a different UA when creating a tab:
+
+```bash
+curl -X POST http://localhost:9377/tabs \
+  -H 'Content-Type: application/json' \
+  -d '{"userId":"me","sessionKey":"task","userAgent":"chrome","url":"https://example.com"}'
+```
+
+`userAgent` accepts `"chrome"` (a desktop Chrome UA matching the host platform) or
+a full UA string.
+
+Rules of the road:
+
+1. **Per-session only.** It must be set when the session's `BrowserContext` is
+   created; the UA is baked in and rewritten for both the HTTP `User-Agent`
+   header and `navigator.userAgent`. There is no way to patch a live context
+   afterwards because Camoufox runs automation scripts (`addInitScript`,
+   `evaluate`) in an isolated world. An *empty* session is recreated
+   automatically; a session that already has open tabs returns
+   `409 user_agent_mismatch` -- delete it (`DELETE /sessions/:userId`) and
+   create the tab again.
+2. **Use a desktop UA, never a mobile one.** A UA containing `Mobile` flips many
+   sites (华医网 included) onto a mobile player path that behaves differently and
+   commonly fails with its own error (e.g. Polyv `#007`) under a desktop engine.
+3. **Don't set it globally.** `CAMOFOX_USER_AGENT=chrome` / `"userAgent": "chrome"`
+   in `camofox.config.json` applies to *every* session and every site, degrading
+   anti-detection consistency everywhere. If you need it, scope it to one
+   `sessionKey`/`userId` via the request field instead of the global config.
+4. **Still Firefox.** The engine, TLS stack, and the rest of the fingerprint are
+   unchanged; this is a UA-level compatibility shim, not browser emulation.
 
 ## Architecture
 
