@@ -2545,6 +2545,85 @@
         }
       }
     },
+    "/tabs/{tabId}/evaluate-main": {
+      "post": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Evaluate in the page's main world",
+        "description": "Runs the expression where page scripts run, so page-owned globals (window.player, custom app objects) are visible. Requires the server to be started with CAMOFOX_ALLOW_MAIN_WORLD=1, which disables Camoufox world isolation (weaker anti-detection). Returns 409 when not enabled.",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "userId",
+                  "expression"
+                ],
+                "properties": {
+                  "userId": {
+                    "type": "string"
+                  },
+                  "expression": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Evaluation result in `result`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "result": {}
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Main-world evaluation is not enabled on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Browser session expired; caller should retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/tabs/{tabId}/extract": {
       "post": {
         "tags": [

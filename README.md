@@ -645,6 +645,7 @@ Browser behavior can be tuned in `camofox.config.json`:
 | `CAMOUFOX_EXECUTABLE_PATH` | Compatibility alias for `CAMOUFOX_EXECUTABLE` | - |
 | `CAMOFOX_EXECUTABLE_PATH` | Compatibility alias for `CAMOUFOX_EXECUTABLE` | - |
 | `CAMOFOX_DISABLE_DEFAULT_ADDONS` | Set to `1`/`true` to skip downloading and launching the default uBlock Origin (UBO) addon. Useful for deployments where the addons.mozilla.org download is unreliable or unwanted (a failed download otherwise leaves a broken addon cache that blocks startup). | `0` |
+| `CAMOFOX_ALLOW_MAIN_WORLD` | Set to `1`/`true` to let `POST /tabs/:tabId/evaluate-main` run scripts in the page's **main world**, so page-owned globals (`window.player`, custom app objects) are reachable. Under the hood this enables Camoufox `disableWorldIsolation` (required — `main_world_eval` alone is not enough on v152), which **removes world isolation and weakens anti-detection**. Off by default; scoped use only. | `0` |
 | `CAMOFOX_COOKIES_DIR` | Directory for cookie files | `~/.camofox/cookies` |
 | `CAMOFOX_UPLOADS_DIR` | Directory allowed for `POST /tabs/:tabId/upload` file attachments. Paths outside it, including symlink escapes, are rejected. | `~/.camofox/uploads` |
 | `CAMOFOX_PROFILE_DIR` | Directory for persisted session profiles | `~/.camofox/profiles` |

@@ -1221,6 +1221,13 @@ async function launchBrowserInstance() {
         ...(CONFIG.disableContentSandbox
           ? { firefox_user_prefs: { 'security.sandbox.content.level': 0 } }
           : {}),
+        // Opt-in main-world evaluate. main_world_eval alone is not enough --
+        // Camoufox v152 needs disableWorldIsolation for page.evaluate() to see
+        // page globals (window.player etc.); without it, evaluate stays in the
+        // utility world even with allowMainWorld set. Verified empirically.
+        ...(CONFIG.allowMainWorld
+          ? { main_world_eval: true, i_know_what_im_doing: true, config: { disableWorldIsolation: true } }
+          : {}),
       }, {
         attempt,
         proxyServer: launchProxy?.server || null,
@@ -1280,7 +1287,11 @@ async function launchBrowserInstance() {
         proxyMode: proxyPool?.mode || null,
         proxyServer: launchProxy?.server || null,
         proxySession: launchProxy?.sessionId || null,
+        allowMainWorld: CONFIG.allowMainWorld,
       });
+      if (CONFIG.allowMainWorld) {
+        log('warn', 'main-world evaluate is ENABLED (CAMOFOX_ALLOW_MAIN_WORLD): page globals are reachable from evaluate(), but world isolation is disabled — anti-detection is weaker. Turn it off when not needed.', {});
+      }
       return browser;
     } catch (err) {
       lastError = err;
@@ -6109,7 +6120,108 @@ app.post('/tabs/:tabId/evaluate', express.json({ limit: CONFIG.evaluateMaxBodySi
   }
 });
 
-// Structured extraction using JSON Schema with x-ref hints
+// Evaluate an expression in the page's MAIN world (so page globals are visible).
+// Requires CAMOFOX_ALLOW_MAIN_WORLD=1 (or workarounds.allowMainWorld) at launch;
+// otherwise evaluate() stays sandboxed and window.<appGlobal> is unreachable.
+/**
+ * @openapi
+ * /tabs/{tabId}/evaluate-main:
+ *   post:
+ *     tags: [Content]
+ *     summary: Evaluate in the page's main world
+ *     description: >-
+ *       Runs the expression where page scripts run, so page-owned globals
+ *       (window.player, custom app objects) are visible. Requires the server to be
+ *       started with CAMOFOX_ALLOW_MAIN_WORLD=1, which disables Camoufox world
+ *       isolation (weaker anti-detection). Returns 409 when not enabled.
+ *     parameters:
+ *       - name: tabId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [userId, expression]
+ *             properties:
+ *               userId:
+ *                 type: string
+ *               expression:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Evaluation result in `result`.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok:
+ *                   type: boolean
+ *                 result: {}
+ *       409:
+ *         description: Main-world evaluation is not enabled on this server.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       503:
+ *         description: Browser session expired; caller should retry.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+app.post('/tabs/:tabId/evaluate-main', express.json({ limit: CONFIG.evaluateMaxBodySize }), async (req, res) => {
+  try {
+    const { userId, expression } = req.body;
+    if (!userId) return res.status(400).json({ error: 'userId is required' });
+    if (!expression) return res.status(400).json({ error: 'expression is required' });
+    if (!CONFIG.allowMainWorld) {
+      return res.status(409).json({
+        error: 'Main-world evaluation is not enabled. Start the server with CAMOFOX_ALLOW_MAIN_WORLD=1 (or set workarounds.allowMainWorld in camofox.config.json). Note this disables Camoufox world isolation.',
+        code: 'main_world_disabled',
+        retryable: false,
+      });
+    }
+
+    const session = sessions.get(normalizeUserId(userId));
+    const found = session && findTab(session, req.params.tabId);
+    if (!found) return tabNotFoundResponse(res, req.params.tabId || req.body?.tabId);
+
+    session.lastAccess = Date.now();
+    const { tabState } = found;
+    tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
+
+    pluginEvents.emit('tab:evaluate', { userId, tabId: req.params.tabId, expression, mainWorld: true });
+    // With disableWorldIsolation the "main" world is where the injected script runs.
+    const result = await withUserLimit(userId, () => withTabLock(
+      req.params.tabId,
+      async () => {
+        const cdp = await tabState.page.context().newCDPSession(tabState.page).catch(() => null);
+        if (!cdp) {
+          // Firefox/protocol may not expose CDP here; fall back to page.evaluate
+          // (which is main-world when world isolation is disabled).
+          return await tabState.page.evaluate(expression);
+        }
+        // Use Playwright's main-world evaluation where available.
+        return await tabState.page.mainFrame().evaluate(expression);
+      },
+      requestTimeoutMs(),
+      () => destroyTimedOutTab(session, req.params.tabId, 'operation_timeout', userId),
+    ));
+    pluginEvents.emit('tab:evaluated', { userId, tabId: req.params.tabId, result });
+    log('info', 'evaluate-main', { reqId: req.reqId, tabId: req.params.tabId, userId, resultType: typeof result });
+    res.json({ ok: true, result, mainWorld: true });
+  } catch (err) {
+    log('error', 'evaluate-main failed', { reqId: req.reqId, tabId: req.params.tabId, error: err.message });
+    handleRouteError(err, req, res);
+  }
+});
 /**
  * @openapi
  * /tabs/{tabId}/extract:
@@ -7915,3 +8027,4 @@ server.on('error', (err) => {
   log('error', 'server error', { error: err.message });
   process.exit(1);
 });
+
