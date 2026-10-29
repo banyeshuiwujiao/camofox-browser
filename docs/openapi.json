@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "camofox-browser",
-    "version": "1.6.0",
+    "version": "1.19.0-local.1",
     "description": "Anti-detection browser automation server for AI agents. Accessibility snapshots, element refs, session isolation, cookie import, proxy rotation, and structured logs.",
     "license": {
       "name": "MIT",
@@ -59,7 +59,12 @@
       "BearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Bearer token matching CAMOFOX_API_KEY."
+        "description": "Bearer token matching CAMOFOX_API_KEY (per-route auth for sensitive endpoints like cookie import and traces)."
+      },
+      "AccessKeyAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Bearer token matching CAMOFOX_ACCESS_KEY. When set, gates all routes except /health, cookie import, and /stop. Acts as a superkey -- also accepted by endpoints that normally require CAMOFOX_API_KEY."
       }
     },
     "schemas": {
@@ -203,6 +208,146 @@
         }
       }
     },
+    "/sessions/{userId}/storage_state": {
+      "get": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Export a session's storage state",
+        "description": "Return the live Playwright storage state (cookies + per-origin localStorage) for an active session. Contains authenticated material; requires auth and must not be logged by callers.",
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Storage state (cookies and origins).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No active session for the user.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sessions/{userId}/local-storage": {
+      "post": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Import localStorage into a session",
+        "description": "Seed per-origin localStorage for a session by visiting each declared origin and writing the entries. Origins must be unique HTTP/HTTPS origins without credentials (max 20); each origin may carry up to 500 entries.",
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "origins"
+                ],
+                "properties": {
+                  "origins": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "origin",
+                        "localStorage"
+                      ],
+                      "properties": {
+                        "origin": {
+                          "type": "string"
+                        },
+                        "localStorage": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "required": [
+                              "name",
+                              "value"
+                            ],
+                            "properties": {
+                              "name": {
+                                "type": "string"
+                              },
+                              "value": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Import result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Import failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/health": {
       "get": {
         "tags": [
@@ -296,6 +441,105 @@
         }
       }
     },
+    "/pressure/cleanup": {
+      "post": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Proactive memory-pressure cleanup",
+        "description": "Closes tabs observed idle across multiple checks while preserving tabs\nwith active/queued operations. Never returns URLs, titles, cookies,\npage text, or user IDs. Defaults to dry-run mode.\n",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "dryRun": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "When true, returns candidates without closing them."
+                  },
+                  "minIdleMs": {
+                    "type": "number",
+                    "default": 600000,
+                    "description": "Minimum idle time (ms) before a tab is eligible."
+                  },
+                  "maxTabsToClose": {
+                    "type": "number",
+                    "default": 4,
+                    "description": "Maximum tabs to close per invocation."
+                  },
+                  "minTabsPerSession": {
+                    "type": "number",
+                    "default": 1,
+                    "description": "Preserve at least this many tabs per session."
+                  },
+                  "closeEmptySessions": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Close sessions left with zero tabs after cleanup."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Cleanup result with before/after counts and hashed metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "dryRun": {
+                      "type": "boolean"
+                    },
+                    "before": {
+                      "type": "object",
+                      "properties": {
+                        "sessions": {
+                          "type": "integer"
+                        },
+                        "tabs": {
+                          "type": "integer"
+                        }
+                      }
+                    },
+                    "after": {
+                      "type": "object",
+                      "properties": {
+                        "sessions": {
+                          "type": "integer"
+                        },
+                        "tabs": {
+                          "type": "integer"
+                        }
+                      }
+                    },
+                    "candidates": {
+                      "type": "integer"
+                    },
+                    "closed": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "preserved": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/tabs": {
       "post": {
         "tags": [
@@ -333,6 +577,15 @@
                   "trace": {
                     "type": "boolean",
                     "description": "Enable Playwright tracing for this session (screenshots, DOM snapshots, network). Must be set on first tab creation; cannot be added to an existing session."
+                  },
+                  "userAgent": {
+                    "type": "string",
+                    "description": "Override the session's user agent. Use \"chrome\" for a Chrome UA matching the host platform, or pass a full UA string. Needed for sites that hard-block Firefox (e.g. Polyv-based players reject Firefox with #024). Fixes both the HTTP header and navigator.userAgent, and applies to the whole user session (popups included). Must be set when the session is created; an empty session is recreated automatically, a session with open tabs returns 409. Defaults to CAMOFOX_USER_AGENT."
+                  },
+                  "reuseTab": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Opt in to reusing an existing open tab in the same session group when its URL matches the requested URL. Incidental differences are ignored (trailing/duplicate slashes, default port, host casing), but the path, query string and fragment remain significant: `?page=1` and `?page=2`, and `#a` and `#b`, are different targets. Non-HTTP(S) URLs are never reused. Off by default so `POST /tabs` keeps creating a tab (and the per-session limit/recycling contract stays intact)."
                   }
                 }
               }
@@ -352,6 +605,15 @@
                     },
                     "url": {
                       "type": "string"
+                    },
+                    "httpStatus": {
+                      "type": "integer",
+                      "nullable": true,
+                      "description": "HTTP status of the optional initial document navigation."
+                    },
+                    "navigationOk": {
+                      "type": "boolean",
+                      "description": "False when the optional initial document navigation returned HTTP 400 or higher."
                     }
                   }
                 }
@@ -369,7 +631,7 @@
             }
           },
           "409": {
-            "description": "Cannot enable tracing on an existing session.",
+            "description": "Cannot enable tracing on an existing session, or the session was created with a different userAgent and still has open tabs (delete the session first).",
             "content": {
               "application/json": {
                 "schema": {
@@ -502,11 +764,31 @@
         },
         "responses": {
           "200": {
-            "description": "Navigation result with snapshot.",
+            "description": "Navigation result. Destination HTTP status is reported even when a rendered error page is available.",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "tabId": {
+                      "type": "string"
+                    },
+                    "url": {
+                      "type": "string"
+                    },
+                    "httpStatus": {
+                      "type": "integer",
+                      "nullable": true,
+                      "description": "HTTP status of the final document navigation when available."
+                    },
+                    "navigationOk": {
+                      "type": "boolean",
+                      "description": "False when the final document returned an HTTP status of 400 or greater."
+                    }
+                  }
                 }
               }
             }
@@ -588,6 +870,18 @@
                 "false"
               ]
             }
+          },
+          {
+            "name": "annotateScreenshot",
+            "in": "query",
+            "description": "When 'true', include screenshotAnnotations — per-ref bounding boxes ({ refId, role, name, x, y, width, height }) for visible elements, aligned with the screenshot pixel space.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            }
           }
         ],
         "responses": {
@@ -603,6 +897,10 @@
                     },
                     "snapshot": {
                       "type": "string"
+                    },
+                    "structure": {
+                      "type": "object",
+                      "description": "Optional bounded read-only DOM summary of forms and tables. The snapshot field remains unchanged."
                     },
                     "refsCount": {
                       "type": "integer"
@@ -626,6 +924,212 @@
           },
           "404": {
             "description": "Tab not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/ax": {
+      "get": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Raw accessibility (ARIA) snapshot",
+        "description": "Return the page's raw ariaSnapshot() YAML plus url, title, and viewport. Lower-level than /snapshot — it does not build or annotate refs, extract DOM structure, or manufacture candidates. Intended as an AX transport for decision models.",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw AX snapshot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing userId.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Tab not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/actionables": {
+      "get": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "List actionable elements and text inputs",
+        "description": "Discovery metadata for the current page. Returns visible link/button/combobox candidates (each paired with its ref) and visible text inputs (each with a stable targetId plus visibility and sensitivity signals). This is candidate discovery only — the selected ref is re-resolved in the interaction route before acting.",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            },
+            "description": "Maximum number of actionable candidates to return (default 100)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Actionable candidates and text inputs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing userId.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Tab not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/tables/{tableId}/rows": {
+      "get": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Read paginated rows of an advertised table",
+        "description": "Returns a row-paginated, read-only view of a single table. tableId must be one advertised by the current snapshot's structure (table.id or the positional table-N fallback). Rowspan/colspan are expanded so each row aligns with the header fields. Tables containing credential/secret/token/api-key inputs are not returned.",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tableId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Row offset to start from (default 0)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A bounded page of rendered table rows.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing userId or invalid offset.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Tab or advertised table not found.",
             "content": {
               "application/json": {
                 "schema": {
@@ -750,6 +1254,7 @@
                   },
                   "coordinates": {
                     "type": "object",
+                    "description": "Viewport-coordinate click target. Use when no ref or selector addresses the element (e.g. a widget inside a cross-origin iframe).",
                     "properties": {
                       "x": {
                         "type": "number"
@@ -758,6 +1263,14 @@
                         "type": "number"
                       }
                     }
+                  },
+                  "expected_role": {
+                    "type": "string",
+                    "description": "Optional precondition. The click is refused with a 200 semantic_target_mismatch result (and a fresh snapshot) if the ref no longer resolves to this ARIA role."
+                  },
+                  "expected_accessible_name": {
+                    "type": "string",
+                    "description": "Optional precondition. The click is refused with a 200 semantic_target_mismatch result (and a fresh snapshot) if the ref no longer resolves to this accessible name."
                   }
                 }
               }
@@ -794,6 +1307,347 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Page changed during the click; caller should take a fresh snapshot and retry with current refs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/drag": {
+      "post": {
+        "tags": [
+          "Interaction"
+        ],
+        "summary": "Perform an atomic trusted mouse drag",
+        "description": "Dispatches one low-level Playwright mouse gesture: move to `start`, press `button`, move through deterministic interpolated points to `end` over `durationMs`, and release the button. This is an atomic gesture rather than a generic replacement for the individual mouse actions.\n",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "description": "Managed tab identifier.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "userId"
+                ],
+                "description": "Supply the press point as `start` (coordinates) or `handle` (a snapshot ref like `e12` or a CSS selector); supply the release point as `end` (coordinates) or `deltaX`/`deltaY` relative to the press point. This makes a slider-handle drag a single request: `{ handle: \"e12\", deltaX: 266 }`.\n",
+                "properties": {
+                  "userId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Non-empty user/session identifier."
+                  },
+                  "start": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "x",
+                      "y"
+                    ],
+                    "description": "Starting viewport coordinate (alternative to `handle`).",
+                    "properties": {
+                      "x": {
+                        "type": "number",
+                        "description": "Starting horizontal viewport coordinate."
+                      },
+                      "y": {
+                        "type": "number",
+                        "description": "Starting vertical viewport coordinate."
+                      }
+                    }
+                  },
+                  "handle": {
+                    "type": "string",
+                    "description": "Snapshot ref (e.g. `e12`) or CSS selector resolved to its centre as the press point (alternative to `start`)."
+                  },
+                  "end": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "x",
+                      "y"
+                    ],
+                    "description": "Ending viewport coordinate (alternative to `deltaX`/`deltaY`).",
+                    "properties": {
+                      "x": {
+                        "type": "number",
+                        "description": "Ending horizontal viewport coordinate."
+                      },
+                      "y": {
+                        "type": "number",
+                        "description": "Ending vertical viewport coordinate."
+                      }
+                    }
+                  },
+                  "deltaX": {
+                    "type": "number",
+                    "description": "Horizontal offset from the press point (alternative to `end`)."
+                  },
+                  "deltaY": {
+                    "type": "number",
+                    "description": "Vertical offset from the press point (alternative to `end`)."
+                  },
+                  "steps": {
+                    "type": "integer",
+                    "default": 12,
+                    "minimum": 1,
+                    "maximum": 24,
+                    "description": "Number of interpolated moves after pressing the button."
+                  },
+                  "durationMs": {
+                    "type": "integer",
+                    "default": 800,
+                    "minimum": 1,
+                    "maximum": 5000,
+                    "description": "Total delay, in milliseconds, distributed across the interpolated moves."
+                  },
+                  "button": {
+                    "type": "string",
+                    "enum": [
+                      "left",
+                      "right",
+                      "middle"
+                    ],
+                    "default": "left",
+                    "description": "Mouse button held for the gesture."
+                  },
+                  "easing": {
+                    "type": "string",
+                    "enum": [
+                      "linear",
+                      "easeInOut"
+                    ],
+                    "default": "linear",
+                    "description": "Motion curve. `easeInOut` (smoothstep) produces a more human slider trajectory."
+                  },
+                  "jitterPx": {
+                    "type": "number",
+                    "default": 0,
+                    "minimum": 0,
+                    "maximum": 8,
+                    "description": "Deterministic perpendicular wiggle in CSS px (0 = none). Adds a human micro-tremor to the path."
+                  },
+                  "overshootPx": {
+                    "type": "number",
+                    "default": 0,
+                    "minimum": 0,
+                    "maximum": 24,
+                    "description": "Optional overshoot along the drag vector mid-flight (0 = none), returning exactly to `end`."
+                  },
+                  "overshootBounds": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "Optional rect in viewport coordinates that the overshoot peak must stay inside (4 CSS px margin), on top of the viewport clamp. Pass the captcha widget box returned by `/verification/challenge` (`box`) or `/verification/puzzle-gap` (`bgBox`) to keep the dart-past motion inside the widget.",
+                    "properties": {
+                      "x": {
+                        "type": "number",
+                        "default": 0
+                      },
+                      "y": {
+                        "type": "number",
+                        "default": 0
+                      },
+                      "width": {
+                        "type": "number",
+                        "minimum": 1
+                      },
+                      "height": {
+                        "type": "number",
+                        "minimum": 1
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Completed atomic drag gesture.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "start",
+                    "end",
+                    "steps",
+                    "durationMs",
+                    "button"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "start": {
+                      "type": "object"
+                    },
+                    "end": {
+                      "type": "object"
+                    },
+                    "steps": {
+                      "type": "integer"
+                    },
+                    "durationMs": {
+                      "type": "integer"
+                    },
+                    "button": {
+                      "type": "string"
+                    },
+                    "easing": {
+                      "type": "string",
+                      "description": "Motion curve actually used."
+                    },
+                    "jitterPx": {
+                      "type": "number"
+                    },
+                    "overshootPx": {
+                      "type": "number",
+                      "description": "Overshoot actually used. May be lower than requested when the viewport edge would otherwise be crossed (keep-alive margin of 4 CSS px)."
+                    },
+                    "requestedOvershootPx": {
+                      "type": "number",
+                      "description": "Present only when the overshoot was clamped."
+                    },
+                    "overshootClamped": {
+                      "type": "boolean",
+                      "description": "Present and true when the viewport or `overshootBounds` forced a smaller overshoot."
+                    },
+                    "overshootBounds": {
+                      "type": "object",
+                      "description": "Present only when the request supplied an explicit overshoot rect (echoed back)."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request body or drag options.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Tab not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Drag failed in the browser.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/upload": {
+      "post": {
+        "tags": [
+          "Interaction"
+        ],
+        "summary": "Attach a file to an upload control",
+        "description": "Attaches files from the configured upload directory without going through the native OS file dialog. Set CAMOFOX_UPLOADS_DIR to a directory that contains the files (default: ~/.camofox/uploads). Two strategies are tried in order: (1) if an <input type=\"file\"> is already present, call Playwright setInputFiles on it directly (works for hidden inputs); (2) otherwise arm a filechooser listener, activate the trigger element (ref or selector) via keyboard (focus + Enter) then a forced click as fallback, and call setFiles on the resulting chooser. Each path must be an absolute path that resolves inside the configured upload directory.\n",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "userId",
+                  "path"
+                ],
+                "properties": {
+                  "userId": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "description": "Absolute path, or array of paths, that resolves within CAMOFOX_UPLOADS_DIR.",
+                    "oneOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    ]
+                  },
+                  "ref": {
+                    "type": "string",
+                    "description": "Trigger element ref (e.g. e36). Optional when an input[type=file] already exists."
+                  },
+                  "selector": {
+                    "type": "string",
+                    "description": "Trigger element CSS/Playwright selector. Optional when an input[type=file] already exists."
+                  },
+                  "timeout": {
+                    "type": "integer",
+                    "default": 12000,
+                    "description": "Overall budget in ms to wait for an upload UI (in-app panel input or native file chooser) to appear after the trigger is activated. Ignored values (non-numeric or <= 0) fall back to the default."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "File(s) attached."
+          },
+          "400": {
+            "description": "Bad request (missing path/userId; non-regular file; or a path that is missing or outside the configured upload directory)."
+          },
+          "404": {
+            "description": "Tab not found."
           }
         }
       }
@@ -854,6 +1708,95 @@
         "responses": {
           "200": {
             "description": "Type result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Tab not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Page changed or target became invalid; caller should take a fresh snapshot and retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/select": {
+      "post": {
+        "tags": [
+          "Interaction"
+        ],
+        "summary": "Select a native form option",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "userId",
+                  "option"
+                ],
+                "properties": {
+                  "userId": {
+                    "type": "string"
+                  },
+                  "ref": {
+                    "type": "string"
+                  },
+                  "selector": {
+                    "type": "string"
+                  },
+                  "option": {
+                    "type": "string",
+                    "description": "Visible option label or HTML value."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Option selected.",
             "content": {
               "application/json": {
                 "schema": {
@@ -984,11 +1927,15 @@
                   },
                   "direction": {
                     "type": "string",
-                    "description": "\"up\" or \"down\" (default \"down\")."
+                    "description": "\"up\", \"down\", \"left\", or \"right\" (default \"down\")."
                   },
                   "amount": {
                     "type": "integer",
                     "description": "Pixels to scroll."
+                  },
+                  "timeoutMs": {
+                    "type": "integer",
+                    "description": "Max milliseconds to wait for the scroll (default 5000, clamped to 500-30000). Scrolling is injected as native `window.scrollBy({behavior:\"instant\"})` so it never blocks on network idle — streaming/video pages that permanently hold long-lived connections no longer hang for 30s.\n"
                   }
                 }
               }
@@ -1004,6 +1951,454 @@
                   "type": "object",
                   "properties": {
                     "ok": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Tab not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/activate": {
+      "post": {
+        "tags": [
+          "Interaction"
+        ],
+        "summary": "Bring a tab to the front",
+        "description": "Make the tab the active/foreground page in its browser context. Useful when driving multiple tabs so input and screenshots target the intended tab.",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "userId"
+                ],
+                "properties": {
+                  "userId": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Tab activated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing userId.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Tab not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Tab was destroyed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/mouse-wheel": {
+      "post": {
+        "tags": [
+          "Interaction"
+        ],
+        "summary": "Dispatch a real wheel event at element or coordinate",
+        "description": "Moves the mouse to a target (resolved from a ref's bounding-box centre, an explicit (x, y) pair, or the viewport centre) and dispatches a real Playwright wheel event. Useful for nested scrollable containers that ignore programmatic scrollTop or JS-dispatched WheelEvents.\n",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "userId"
+                ],
+                "properties": {
+                  "userId": {
+                    "type": "string"
+                  },
+                  "ref": {
+                    "type": "string",
+                    "description": "Element ref (e.g. \"e22\"). Wheel is dispatched at its bounding-box centre."
+                  },
+                  "x": {
+                    "type": "number",
+                    "description": "Explicit x coordinate (ignored if ref is set)."
+                  },
+                  "y": {
+                    "type": "number",
+                    "description": "Explicit y coordinate (ignored if ref is set)."
+                  },
+                  "deltaX": {
+                    "type": "number",
+                    "default": 0,
+                    "description": "Horizontal scroll delta (-100000..100000). At least one delta must be non-zero."
+                  },
+                  "deltaY": {
+                    "type": "number",
+                    "default": 0,
+                    "description": "Vertical scroll delta (-100000..100000). At least one delta must be non-zero."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Wheel dispatched.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "x": {
+                      "type": "number"
+                    },
+                    "y": {
+                      "type": "number"
+                    },
+                    "deltaX": {
+                      "type": "number"
+                    },
+                    "deltaY": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing userId, invalid coordinates/deltas, or both deltas are zero.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Tab not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Ref is stale or the element has no bounding box.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/init-script": {
+      "post": {
+        "tags": [
+          "Interaction"
+        ],
+        "summary": "Register a script that runs before every navigation",
+        "description": "Adds a persistent init script to the tab's page. It executes in the page context before any page script on every subsequent navigation, which is the only reliable way to install fetch/XHR hooks that must catch the first request after a full reload. Scripts accumulate: each call adds one more, and they are dropped when the tab is destroyed. Requires the same bearer token as /tabs/{tabId}/evaluate, since the script runs arbitrary JS.\n",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "userId",
+                  "script"
+                ],
+                "properties": {
+                  "userId": {
+                    "type": "string"
+                  },
+                  "script": {
+                    "type": "string",
+                    "description": "JavaScript source evaluated in the page context before every navigation."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Init script registered.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "scriptLen": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing userId or empty script.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing or invalid bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Tab not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/viewport": {
+      "post": {
+        "tags": [
+          "Interaction"
+        ],
+        "summary": "Set the page viewport size",
+        "description": "Physically resizes the page via Playwright's `page.setViewportSize`, triggering a real layout reflow. Use for responsive testing — `window.resizeTo()` is a no-op on non-popup windows.\n",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "userId",
+                  "width",
+                  "height"
+                ],
+                "properties": {
+                  "userId": {
+                    "type": "string"
+                  },
+                  "width": {
+                    "type": "integer",
+                    "minimum": 100,
+                    "maximum": 4000
+                  },
+                  "height": {
+                    "type": "integer",
+                    "minimum": 100,
+                    "maximum": 4000
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Viewport set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "width": {
+                      "type": "integer"
+                    },
+                    "height": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Width or height missing or out of range."
+          },
+          "404": {
+            "description": "Tab not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/pin": {
+      "post": {
+        "tags": [
+          "Tabs"
+        ],
+        "summary": "Pin or unpin a tab to prevent idle reaping",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "userId": {
+                    "type": "string"
+                  },
+                  "pinned": {
+                    "type": "boolean",
+                    "default": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Pin state updated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "tabId": {
+                      "type": "string"
+                    },
+                    "pinned": {
                       "type": "boolean"
                     }
                   }
@@ -1184,6 +2579,10 @@
                 "properties": {
                   "userId": {
                     "type": "string"
+                  },
+                  "timeoutMs": {
+                    "type": "integer",
+                    "description": "Max milliseconds to wait for the reload (default 15000, clamped to 1000-60000). Reloads wait for `domcontentloaded` (not full load), and an aborted or timed-out reload on streaming pages (e.g. NS_BINDING_ABORTED) falls back to an in-page `location.reload()` instead of returning HTTP 500.\n"
                   }
                 }
               }
@@ -1289,6 +2688,53 @@
         }
       }
     },
+    "/tabs/{tabId}/fetch-current-resource": {
+      "post": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Save the current tab's PDF as a download artifact",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "userId"
+                ],
+                "properties": {
+                  "userId": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved PDF download artifact."
+          },
+          "404": {
+            "description": "Tab not found."
+          },
+          "415": {
+            "description": "Current resource is not a PDF."
+          }
+        }
+      }
+    },
     "/tabs/{tabId}/downloads": {
       "get": {
         "tags": [
@@ -1345,6 +2791,64 @@
           },
           "404": {
             "description": "Tab not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/downloads/{downloadId}/content": {
+      "get": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Fetch a completed download",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "downloadId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw download bytes.",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Download is unknown, expired, failed, or unavailable.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1448,6 +2952,16 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "fullPage",
+            "in": "query",
+            "required": false,
+            "description": "Capture the full scrollable page instead of the viewport.",
+            "schema": {
+              "type": "boolean",
+              "default": false
             }
           }
         ],
@@ -1560,6 +3074,366 @@
         }
       }
     },
+    "/tabs/{tabId}/console": {
+      "get": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Get console logs for a tab",
+        "description": "Returns captured console messages and unhandled errors for the tab.",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 100
+            },
+            "description": "Maximum number of logs to return."
+          },
+          {
+            "name": "types",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated list of log types to filter by (e.g. error,warn,log,info)."
+          },
+          {
+            "name": "clear",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Clear logs after reading."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Console logs list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "tabId": {
+                      "type": "string"
+                    },
+                    "logs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "type": "string"
+                          },
+                          "text": {
+                            "type": "string"
+                          },
+                          "location": {
+                            "type": "object"
+                          },
+                          "timestamp": {
+                            "type": "integer"
+                          }
+                        }
+                      }
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
+                    "total": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing userId."
+          },
+          "404": {
+            "description": "Tab not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Clear console logs for a tab",
+        "description": "Clears all captured console messages for the tab.",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Console logs cleared.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "cleared": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing userId."
+          },
+          "404": {
+            "description": "Tab not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/network": {
+      "get": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Get network requests for a tab",
+        "description": "Returns captured HTTP requests and responses for the tab.",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 100
+            },
+            "description": "Maximum number of network requests to return."
+          },
+          {
+            "name": "resourceTypes",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated list of resource types (e.g. document,xhr,fetch,script,stylesheet,image)."
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filter by status code (e.g. 200, 404) or \"failed\"."
+          },
+          {
+            "name": "clear",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Clear network requests after reading."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Network requests list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "tabId": {
+                      "type": "string"
+                    },
+                    "requests": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "url": {
+                            "type": "string"
+                          },
+                          "method": {
+                            "type": "string"
+                          },
+                          "resourceType": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "integer"
+                          },
+                          "statusText": {
+                            "type": "string"
+                          },
+                          "ok": {
+                            "type": "boolean"
+                          },
+                          "durationMs": {
+                            "type": "integer"
+                          },
+                          "failure": {
+                            "type": "string"
+                          },
+                          "timestamp": {
+                            "type": "integer"
+                          }
+                        }
+                      }
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
+                    "total": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing userId."
+          },
+          "404": {
+            "description": "Tab not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Clear network requests for a tab",
+        "description": "Clears all captured network requests for the tab.",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Network requests cleared.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "cleared": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing userId."
+          },
+          "404": {
+            "description": "Tab not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/tabs/{tabId}/evaluate": {
       "post": {
         "tags": [
@@ -1593,7 +3467,14 @@
                   },
                   "expression": {
                     "type": "string",
-                    "description": "JavaScript expression to evaluate."
+                    "description": "JavaScript expression to evaluate. This is an expression, not a function body: a top-level `return` is a syntax error. Wrap statements in an IIFE — `(() => { ... return x; })()` — and note that a bare arrow function (`() => x`, uncalled) evaluates to a function object and serializes to no result.\n",
+                    "example": "document.title"
+                  },
+                  "timeoutMs": {
+                    "type": "integer",
+                    "minimum": 1000,
+                    "maximum": 300000,
+                    "description": "Per-request evaluation budget in milliseconds. Defaults to the server's request timeout. Long scrapes that used to die at the global timeout can raise this up to 300000 (5 minutes); `timeout` is accepted as an alias."
                   }
                 }
               }
@@ -1618,7 +3499,7 @@
             }
           },
           "400": {
-            "description": "Bad request.",
+            "description": "Bad request. `code: invalid_expression` means the expression did not compile (for example a top-level `return`); it is not retryable until the caller fixes the JavaScript.\n",
             "content": {
               "application/json": {
                 "schema": {
@@ -1629,6 +3510,111 @@
           },
           "404": {
             "description": "Tab not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Page navigated while evaluating; caller should retry once the page settles.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Browser session expired; caller should retry to get a fresh session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tabs/{tabId}/evaluate-main": {
+      "post": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Evaluate in the page's main world",
+        "description": "Runs the expression where page scripts run, so page-owned globals (window.player, custom app objects) are visible. Requires the server to be started with CAMOFOX_ALLOW_MAIN_WORLD=1, which disables Camoufox world isolation (weaker anti-detection). Returns 409 when not enabled.",
+        "parameters": [
+          {
+            "name": "tabId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "userId",
+                  "expression"
+                ],
+                "properties": {
+                  "userId": {
+                    "type": "string"
+                  },
+                  "expression": {
+                    "type": "string"
+                  },
+                  "timeoutMs": {
+                    "type": "integer",
+                    "minimum": 1000,
+                    "maximum": 300000,
+                    "description": "Per-request evaluation budget in ms (defaults to the server request timeout)."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Evaluation result in `result`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "result": {}
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Main-world evaluation is not enabled on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Browser session expired; caller should retry.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2222,6 +4208,55 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Sessions"
+        ],
+        "summary": "Inspect a user session",
+        "description": "Returns the session's user agent and open tab count so callers can see why a tab request would hit `409 user_agent_mismatch`, instead of inferring it from the error. `exists: false` means no live session (the next tab request creates a fresh one with the requested UA).",
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "userId": {
+                      "type": "string"
+                    },
+                    "exists": {
+                      "type": "boolean"
+                    },
+                    "userAgent": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "The UA baked into the session's BrowserContext (\"\" for the default Firefox UA)."
+                    },
+                    "tabCount": {
+                      "type": "integer"
+                    },
+                    "closing": {
+                      "type": "boolean",
+                      "description": "True while the session is being torn down/rebuilt."
+                    }
+                  }
                 }
               }
             }

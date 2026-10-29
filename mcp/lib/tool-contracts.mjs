@@ -244,6 +244,10 @@ export const TOOL_DEFS = [
           type: 'string',
           description: 'JavaScript expression to evaluate in the page context',
         },
+        timeoutMs: {
+          type: 'number',
+          description: 'Per-request evaluation budget in ms (1000-300000). Defaults to the server request timeout; raise it for long scrapes instead of retrying.',
+        },
       },
       required: ['tabId', 'expression'],
     },
@@ -320,7 +324,7 @@ export const TOOL_DEFS = [
   {
     name: 'camofox_drag',
     description:
-      'Perform a trusted press-move-release mouse drag between two coordinates in a Camoufox tab.',
+      'Perform a trusted press-move-release mouse drag in a Camoufox tab. Supply the press point as `start` (coordinates) or `handle` (ref/selector); supply the release point as `end` or `deltaX`/`deltaY`. `easing`, `jitterPx`, and `overshootPx` shape a human-like path for slider challenges; `overshootBounds` keeps the overshoot inside a given widget rect.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -329,18 +333,36 @@ export const TOOL_DEFS = [
           type: 'object',
           properties: { x: { type: 'number' }, y: { type: 'number' } },
           required: ['x', 'y'],
-          description: 'Start point',
+          description: 'Start point (alternative to handle)',
         },
+        handle: { type: 'string', description: 'Snapshot ref (e.g. e12) or CSS selector resolved to its centre as the press point' },
         end: {
           type: 'object',
           properties: { x: { type: 'number' }, y: { type: 'number' } },
           required: ['x', 'y'],
-          description: 'End point',
+          description: 'End point (alternative to deltaX/deltaY)',
         },
-        steps: { type: 'number', description: 'Intermediate move steps (default 20)' },
+        deltaX: { type: 'number', description: 'Horizontal offset from the press point' },
+        deltaY: { type: 'number', description: 'Vertical offset from the press point' },
+        steps: { type: 'number', description: 'Intermediate move steps (default 12, max 24)' },
+        durationMs: { type: 'number', description: 'Total gesture duration in ms (default 800)' },
         button: { type: 'string', enum: ['left', 'right', 'middle'], description: 'Mouse button (default left)' },
+        easing: { type: 'string', enum: ['linear', 'easeInOut'], description: 'Motion curve (default linear; easeInOut = smoother slider path)' },
+        jitterPx: { type: 'number', description: 'Deterministic perpendicular wiggle in px (0-8, default 0)' },
+        overshootPx: { type: 'number', description: 'Overshoot along the drag vector in px (0-24, default 0)' },
+        overshootBounds: {
+          type: 'object',
+          description: 'Optional rect in viewport coordinates the overshoot peak must stay inside (captcha widget box), on top of the viewport clamp',
+          properties: {
+            x: { type: 'number', description: 'Left edge (default 0)' },
+            y: { type: 'number', description: 'Top edge (default 0)' },
+            width: { type: 'number', description: 'Rect width in CSS px' },
+            height: { type: 'number', description: 'Rect height in CSS px' },
+          },
+          required: ['width', 'height'],
+        },
       },
-      required: ['tabId', 'start', 'end'],
+      required: ['tabId'],
     },
   },
   {
@@ -680,7 +702,11 @@ export function buildRequest(name, args, ctx) {
         path: `/tabs/${args.tabId}/evaluate`,
         auth: 'accessKey',
         responseKind: 'json',
-        body: { userId, expression: args.expression },
+        body: {
+          userId,
+          expression: args.expression,
+          ...(args.timeoutMs != null && args.timeoutMs !== '' ? { timeoutMs: Number(args.timeoutMs) } : {}),
+        },
       };
     case 'camofox_activate':
       return {

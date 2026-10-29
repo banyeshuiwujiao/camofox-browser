@@ -581,6 +581,11 @@
                   "userAgent": {
                     "type": "string",
                     "description": "Override the session's user agent. Use \"chrome\" for a Chrome UA matching the host platform, or pass a full UA string. Needed for sites that hard-block Firefox (e.g. Polyv-based players reject Firefox with #024). Fixes both the HTTP header and navigator.userAgent, and applies to the whole user session (popups included). Must be set when the session is created; an empty session is recreated automatically, a session with open tabs returns 409. Defaults to CAMOFOX_USER_AGENT."
+                  },
+                  "reuseTab": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Opt in to reusing an existing open tab in the same session group when its URL matches the requested URL. Incidental differences are ignored (trailing/duplicate slashes, default port, host casing), but the path, query string and fragment remain significant: `?page=1` and `?page=2`, and `#a` and `#b`, are different targets. Non-HTTP(S) URLs are never reused. Off by default so `POST /tabs` keeps creating a tab (and the per-session limit/recycling contract stays intact)."
                   }
                 }
               }
@@ -1342,10 +1347,9 @@
                 "type": "object",
                 "additionalProperties": false,
                 "required": [
-                  "userId",
-                  "start",
-                  "end"
+                  "userId"
                 ],
+                "description": "Supply the press point as `start` (coordinates) or `handle` (a snapshot ref like `e12` or a CSS selector); supply the release point as `end` (coordinates) or `deltaX`/`deltaY` relative to the press point. This makes a slider-handle drag a single request: `{ handle: \"e12\", deltaX: 266 }`.\n",
                 "properties": {
                   "userId": {
                     "type": "string",
@@ -1359,6 +1363,7 @@
                       "x",
                       "y"
                     ],
+                    "description": "Starting viewport coordinate (alternative to `handle`).",
                     "properties": {
                       "x": {
                         "type": "number",
@@ -1370,6 +1375,10 @@
                       }
                     }
                   },
+                  "handle": {
+                    "type": "string",
+                    "description": "Snapshot ref (e.g. `e12`) or CSS selector resolved to its centre as the press point (alternative to `start`)."
+                  },
                   "end": {
                     "type": "object",
                     "additionalProperties": false,
@@ -1377,6 +1386,7 @@
                       "x",
                       "y"
                     ],
+                    "description": "Ending viewport coordinate (alternative to `deltaX`/`deltaY`).",
                     "properties": {
                       "x": {
                         "type": "number",
@@ -1387,6 +1397,14 @@
                         "description": "Ending vertical viewport coordinate."
                       }
                     }
+                  },
+                  "deltaX": {
+                    "type": "number",
+                    "description": "Horizontal offset from the press point (alternative to `end`)."
+                  },
+                  "deltaY": {
+                    "type": "number",
+                    "description": "Vertical offset from the press point (alternative to `end`)."
                   },
                   "steps": {
                     "type": "integer",
@@ -1411,6 +1429,52 @@
                     ],
                     "default": "left",
                     "description": "Mouse button held for the gesture."
+                  },
+                  "easing": {
+                    "type": "string",
+                    "enum": [
+                      "linear",
+                      "easeInOut"
+                    ],
+                    "default": "linear",
+                    "description": "Motion curve. `easeInOut` (smoothstep) produces a more human slider trajectory."
+                  },
+                  "jitterPx": {
+                    "type": "number",
+                    "default": 0,
+                    "minimum": 0,
+                    "maximum": 8,
+                    "description": "Deterministic perpendicular wiggle in CSS px (0 = none). Adds a human micro-tremor to the path."
+                  },
+                  "overshootPx": {
+                    "type": "number",
+                    "default": 0,
+                    "minimum": 0,
+                    "maximum": 24,
+                    "description": "Optional overshoot along the drag vector mid-flight (0 = none), returning exactly to `end`."
+                  },
+                  "overshootBounds": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "Optional rect in viewport coordinates that the overshoot peak must stay inside (4 CSS px margin), on top of the viewport clamp. Pass the captcha widget box returned by `/verification/challenge` (`box`) or `/verification/puzzle-gap` (`bgBox`) to keep the dart-past motion inside the widget.",
+                    "properties": {
+                      "x": {
+                        "type": "number",
+                        "default": 0
+                      },
+                      "y": {
+                        "type": "number",
+                        "default": 0
+                      },
+                      "width": {
+                        "type": "number",
+                        "minimum": 1
+                      },
+                      "height": {
+                        "type": "number",
+                        "minimum": 1
+                      }
+                    }
                   }
                 }
               }
@@ -1450,6 +1514,29 @@
                     },
                     "button": {
                       "type": "string"
+                    },
+                    "easing": {
+                      "type": "string",
+                      "description": "Motion curve actually used."
+                    },
+                    "jitterPx": {
+                      "type": "number"
+                    },
+                    "overshootPx": {
+                      "type": "number",
+                      "description": "Overshoot actually used. May be lower than requested when the viewport edge would otherwise be crossed (keep-alive margin of 4 CSS px)."
+                    },
+                    "requestedOvershootPx": {
+                      "type": "number",
+                      "description": "Present only when the overshoot was clamped."
+                    },
+                    "overshootClamped": {
+                      "type": "boolean",
+                      "description": "Present and true when the viewport or `overshootBounds` forced a smaller overshoot."
+                    },
+                    "overshootBounds": {
+                      "type": "object",
+                      "description": "Present only when the request supplied an explicit overshoot rect (echoed back)."
                     }
                   }
                 }
@@ -3382,6 +3469,12 @@
                     "type": "string",
                     "description": "JavaScript expression to evaluate. This is an expression, not a function body: a top-level `return` is a syntax error. Wrap statements in an IIFE — `(() => { ... return x; })()` — and note that a bare arrow function (`() => x`, uncalled) evaluates to a function object and serializes to no result.\n",
                     "example": "document.title"
+                  },
+                  "timeoutMs": {
+                    "type": "integer",
+                    "minimum": 1000,
+                    "maximum": 300000,
+                    "description": "Per-request evaluation budget in milliseconds. Defaults to the server's request timeout. Long scrapes that used to die at the global timeout can raise this up to 300000 (5 minutes); `timeout` is accepted as an alias."
                   }
                 }
               }
@@ -3481,6 +3574,12 @@
                   },
                   "expression": {
                     "type": "string"
+                  },
+                  "timeoutMs": {
+                    "type": "integer",
+                    "minimum": 1000,
+                    "maximum": 300000,
+                    "description": "Per-request evaluation budget in ms (defaults to the server request timeout)."
                   }
                 }
               }

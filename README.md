@@ -564,13 +564,23 @@ curl -X POST http://localhost:9377/tabs/TAB_ID/navigate \
 | `DELETE` | `/tabs/group/:groupId` | Close all tabs in a group |
 | `DELETE` | `/sessions/:userId` | Close all tabs for a user |
 
+`POST /tabs` creates a new tab by default. Pass `{ "reuseTab": true }` to reuse
+an existing tab in the same session group when its URL addresses the same
+target. Incidental differences are ignored — trailing or duplicate slashes,
+default ports, host casing — while the path, **query string** and **fragment**
+stay significant: `/a?page=1` never reuses `/a?page=2`, and
+`/a` never reuses `/a#top`. Non-HTTP(S) pages (`about:blank`, `chrome-error://`)
+are never reused. Reuse stays opt-in so the per-session tab limit and recycling
+behaviour are unchanged for callers that expect one tab per request.
+
 ### Page Interaction
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/tabs/:id/snapshot` | Accessibility snapshot with element refs. Query params: `includeScreenshot=true` (add base64 PNG), `offset=N` (paginate large snapshots) |
 | `POST` | `/tabs/:id/click` | Click element by ref or CSS selector |
-| `POST` | `/tabs/:id/drag` | Perform an atomic trusted mouse drag from `{start:{x,y}}` to `{end:{x,y}}`; optional `steps`, `durationMs`, and `button` |
+| `POST` | `/tabs/:id/drag` | Atomic trusted mouse drag. Press point: `{start:{x,y}}` **or** `handle` (snapshot ref / CSS selector → element centre). Release point: `{end:{x,y}}` **or** `deltaX`/`deltaY` relative to the press point. Optional `steps`, `durationMs`, `button`, `easing` (`linear`/`easeInOut`), `jitterPx` (0-8), `overshootPx` (0-24), and `overshootBounds` (`{x,y,width,height}` rect, e.g. the captcha widget box) that keeps the overshoot peak inside the widget. Overshoot is also clamped 4px inside the viewport; the response reports the applied value plus `overshootClamped` when reduced |
+| `POST` | `/tabs/:id/evaluate` | Evaluate JS in the page context; optional `timeoutMs` (1000-300000, defaults to the server request timeout). Use it for long scrapes instead of retrying |
 | `POST` | `/tabs/:id/type` | Type text into element |
 | `POST` | `/tabs/:id/upload` | Attach files from `CAMOFOX_UPLOADS_DIR` to an upload control (`path`, optional `ref`/`selector`, `timeout`) |
 | `POST` | `/tabs/:id/press` | Press a keyboard key |
