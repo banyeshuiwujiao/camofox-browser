@@ -9,6 +9,7 @@
   "plugins": {
     "youtube": { "enabled": true },
     "persistence": { "enabled": true },
+    "login-guard": { "enabled": true },
     "vnc": { "enabled": false, "resolution": "1920x1080" }
   }
 }

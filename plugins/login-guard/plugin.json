@@ -1,0 +1,6 @@
+{
+  "name": "login-guard",
+  "version": "0.1.0",
+  "description": "Login-verification helpers: detect captcha/slider challenge widgets and control how native JS dialogs (alert/confirm/prompt/beforeunload) are handled per tab.",
+  "enableEnvVar": "CAMOFOX_LOGIN_GUARD"
+}
