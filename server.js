@@ -73,6 +73,7 @@ import {
   isTabLockQueueTimeout, isTabDestroyedError,
   browserErrorStatus, browserErrorCode, browserErrorRecovery, isRetryableBrowserError,
 } from './lib/browser-errors.js';
+import { sameTabUrl } from './lib/url-match.js';
 
 const CONFIG = loadConfig();
 
@@ -744,7 +745,8 @@ function getTabLock(tabId) {
 // and corrupt CDP state.
 async function withTabLock(tabId, operation, timeoutMs = HANDLER_TIMEOUT_MS, onTimeout) {
   const lock = getTabLock(tabId);
-  await lock.acquire(TAB_LOCK_TIMEOUT_MS);
+  const acquireTimeout = Math.max(TAB_LOCK_TIMEOUT_MS, timeoutMs + 5000);
+  await lock.acquire(acquireTimeout);
   const operationPromise = Promise.resolve().then(operation);
   let releaseOnSettlement = false;
   try {
@@ -1362,9 +1364,15 @@ async function launchBrowserInstance() {
         // camoufox-js merges caller-supplied firefox_user_prefs into its own
         // (utils.js keeps the object and mergeInto()s its prefs into it), so this
         // cannot displace Camoufox's fingerprint prefs.
-        ...(CONFIG.disableContentSandbox
-          ? { firefox_user_prefs: { 'security.sandbox.content.level': 0 } }
-          : {}),
+        // Firefox preferences: disable content sandbox if requested, and prevent
+        // background/inactive tabs from suspending media playback or throttling timers.
+        firefox_user_prefs: {
+          ...(CONFIG.disableContentSandbox ? { 'security.sandbox.content.level': 0 } : {}),
+          'media.suspend-bkgnd-video.enabled': false,
+          'media.block-autoplay-until-in-foreground': false,
+          'dom.suspend_inactive_tabs': false,
+          'media.autoplay.default': 0,
+        },
         // Opt-in main-world evaluate. main_world_eval alone is not enough --
         // Camoufox v152 needs disableWorldIsolation for page.evaluate() to see
         // page globals (window.player etc.); without it, evaluate stays in the
@@ -3427,6 +3435,16 @@ app.post('/pressure/cleanup', async (req, res) => {
  *                   (popups included). Must be set when the session is created; an empty session
  *                   is recreated automatically, a session with open tabs returns 409. Defaults to
  *                   CAMOFOX_USER_AGENT.
+ *               reuseTab:
+ *                 type: boolean
+ *                 default: false
+ *                 description: >-
+ *                   Opt in to reusing an existing open tab in the same session group when its URL
+ *                   matches the requested URL. Incidental differences are ignored (trailing/duplicate
+ *                   slashes, default port, host casing), but the path, query string and fragment remain
+ *                   significant: `?page=1` and `?page=2`, and `#a` and `#b`, are different targets.
+ *                   Non-HTTP(S) URLs are never reused. Off by default so `POST /tabs` keeps creating
+ *                   a tab (and the per-session limit/recycling contract stays intact).
  *     responses:
  *       200:
  *         description: Tab created.
@@ -3549,22 +3567,49 @@ app.post('/tabs', async function createTabRoute(req, res) {
         }
       }
       
+      const group = getTabGroup(session, resolvedSessionKey);
+
+      // Reuse is opt-in (`reuseTab: true`): `POST /tabs` must create a tab unless the
+      // caller explicitly accepts an existing one, otherwise the per-session limit
+      // and recycling semantics silently change. When requested, the match is by
+      // URL *target*: trailing slashes / duplicate slashes / default ports are
+      // ignored, but the path, query string and fragment stay significant, so
+      // `/a?x=1` never reuses `/a?x=2` and `/a` never reuses `/a#top`.
+      if (url && req.body.reuseTab === true) {
+        for (const [existingId, state] of group) {
+          if (!state.page?.isClosed?.() && sameTabUrl(safePageUrl(state.page), url)) {
+            log('info', 'reusing existing tab with matching url', { tabId: existingId, url });
+            return res.json({ tabId: existingId, url, reused: true, pinned: !!state.pinned });
+          }
+        }
+      }
+
       let totalTabs = 0;
-      for (const group of session.tabGroups.values()) totalTabs += group.size;
-      
+      for (const g of session.tabGroups.values()) totalTabs += g.size;
+
       // Recycle oldest tab when limits are reached instead of rejecting
       if (totalTabs >= MAX_TABS_PER_SESSION || getTotalTabCount() >= MAX_TABS_GLOBAL) {
         const recycled = await recycleOldestTab(session, req.reqId, userId);
         if (!recycled) {
-          throw Object.assign(new Error('Maximum tabs per session reached'), { statusCode: 429 });
+          const openTabs = [];
+          for (const grp of session.tabGroups.values()) {
+            for (const [tid, state] of grp) {
+              openTabs.push({ tabId: tid, url: safePageUrl(state.page), pinned: !!state.pinned });
+            }
+          }
+          const openSummary = openTabs.map(t => `${t.tabId} (${t.pinned ? 'pinned' : 'unpinned'}, ${t.url})`).join('\n  - ');
+          const err = Object.assign(
+            new Error(`Maximum tabs per session reached (${totalTabs}/${MAX_TABS_PER_SESSION}). 当前标签页 (${openTabs.length} 个):\n  - ${openSummary}\n提示：请用 action=close 关闭已用完的标签页，或避免对非必要标签页传 pin=true。`),
+            { statusCode: 429, tabs: openTabs, totalTabs, maxTabs: MAX_TABS_PER_SESSION }
+          );
+          throw err;
         }
       }
-      
+
       const createdPage = await createPageWithRecoveryForUser(userId, session, { trace: !!trace });
       session = createdPage.session;
       let page = createdPage.page;
       const lease = createdPage.lease;
-      const group = getTabGroup(session, resolvedSessionKey);
 
       const isPinned = Boolean(req.body.pin ?? req.body.pinned);
       const tabId = fly.makeTabId();
@@ -4963,7 +5008,13 @@ app.post('/tabs/:tabId/click', async (req, res) => {
  *           schema:
  *             type: object
  *             additionalProperties: false
- *             required: [userId, start, end]
+ *             required: [userId]
+ *             description: >
+ *               Supply the press point as `start` (coordinates) or `handle`
+ *               (a snapshot ref like `e12` or a CSS selector); supply the
+ *               release point as `end` (coordinates) or `deltaX`/`deltaY`
+ *               relative to the press point. This makes a slider-handle drag a
+ *               single request: `{ handle: "e12", deltaX: 266 }`.
  *             properties:
  *               userId:
  *                 type: string
@@ -4973,6 +5024,7 @@ app.post('/tabs/:tabId/click', async (req, res) => {
  *                 type: object
  *                 additionalProperties: false
  *                 required: [x, y]
+ *                 description: Starting viewport coordinate (alternative to `handle`).
  *                 properties:
  *                   x:
  *                     type: number
@@ -4980,10 +5032,14 @@ app.post('/tabs/:tabId/click', async (req, res) => {
  *                   y:
  *                     type: number
  *                     description: Starting vertical viewport coordinate.
+ *               handle:
+ *                 type: string
+ *                 description: Snapshot ref (e.g. `e12`) or CSS selector resolved to its centre as the press point (alternative to `start`).
  *               end:
  *                 type: object
  *                 additionalProperties: false
  *                 required: [x, y]
+ *                 description: Ending viewport coordinate (alternative to `deltaX`/`deltaY`).
  *                 properties:
  *                   x:
  *                     type: number
@@ -4991,6 +5047,12 @@ app.post('/tabs/:tabId/click', async (req, res) => {
  *                   y:
  *                     type: number
  *                     description: Ending vertical viewport coordinate.
+ *               deltaX:
+ *                 type: number
+ *                 description: Horizontal offset from the press point (alternative to `end`).
+ *               deltaY:
+ *                 type: number
+ *                 description: Vertical offset from the press point (alternative to `end`).
  *               steps:
  *                 type: integer
  *                 default: 12
@@ -5008,6 +5070,44 @@ app.post('/tabs/:tabId/click', async (req, res) => {
  *                 enum: [left, right, middle]
  *                 default: left
  *                 description: Mouse button held for the gesture.
+ *               easing:
+ *                 type: string
+ *                 enum: [linear, easeInOut]
+ *                 default: linear
+ *                 description: Motion curve. `easeInOut` (smoothstep) produces a more human slider trajectory.
+ *               jitterPx:
+ *                 type: number
+ *                 default: 0
+ *                 minimum: 0
+ *                 maximum: 8
+ *                 description: Deterministic perpendicular wiggle in CSS px (0 = none). Adds a human micro-tremor to the path.
+ *               overshootPx:
+ *                 type: number
+ *                 default: 0
+ *                 minimum: 0
+ *                 maximum: 24
+ *                 description: Optional overshoot along the drag vector mid-flight (0 = none), returning exactly to `end`.
+ *               overshootBounds:
+ *                 type: object
+ *                 additionalProperties: false
+ *                 description: >-
+ *                   Optional rect in viewport coordinates that the overshoot peak must stay inside
+ *                   (4 CSS px margin), on top of the viewport clamp. Pass the captcha widget box
+ *                   returned by `/verification/challenge` (`box`) or `/verification/puzzle-gap`
+ *                   (`bgBox`) to keep the dart-past motion inside the widget.
+ *                 properties:
+ *                   x:
+ *                     type: number
+ *                     default: 0
+ *                   y:
+ *                     type: number
+ *                     default: 0
+ *                   width:
+ *                     type: number
+ *                     minimum: 1
+ *                   height:
+ *                     type: number
+ *                     minimum: 1
  *     responses:
  *       200:
  *         description: Completed atomic drag gesture.
@@ -5029,6 +5129,25 @@ app.post('/tabs/:tabId/click', async (req, res) => {
  *                   type: integer
  *                 button:
  *                   type: string
+ *                 easing:
+ *                   type: string
+ *                   description: Motion curve actually used.
+ *                 jitterPx:
+ *                   type: number
+ *                 overshootPx:
+ *                   type: number
+ *                   description: >-
+ *                     Overshoot actually used. May be lower than requested when the viewport
+ *                     edge would otherwise be crossed (keep-alive margin of 4 CSS px).
+ *                 requestedOvershootPx:
+ *                   type: number
+ *                   description: Present only when the overshoot was clamped.
+ *                 overshootClamped:
+ *                   type: boolean
+ *                   description: Present and true when the viewport or `overshootBounds` forced a smaller overshoot.
+ *                 overshootBounds:
+ *                   type: object
+ *                   description: Present only when the request supplied an explicit overshoot rect (echoed back).
  *       400:
  *         description: Invalid request body or drag options.
  *         content:
@@ -5077,7 +5196,8 @@ app.post('/tabs/:tabId/drag', async (req, res) => {
     );
     const result = await withUserLimit(userId, () => withTabLock(tabId, async () => {
       try {
-        return await runTrustedDrag(tabState.page, dragOptions);
+        const endpoints = await resolveDragEndpoints(tabState, dragOptions);
+        return await runTrustedDrag(tabState.page, { ...dragOptions, ...endpoints });
       } finally {
         // A pointer gesture can change rendered content without navigation.
         // Never return a snapshot or refs captured before the gesture.
@@ -5092,6 +5212,45 @@ app.post('/tabs/:tabId/drag', async (req, res) => {
     handleRouteError(err, req, res);
   }
 });
+
+/**
+ * Resolve a drag request into concrete start/end viewport points.
+ *   - `start` coordinates win; otherwise `handle` (ref or selector) -> centre.
+ *   - `end` coordinates win; otherwise `end = start + deltaX/deltaY`.
+ * This lets a slider handle be dragged in one request: `{handle, deltaX}`.
+ * Throws errors carrying `statusCode` for the route error handler to surface.
+ */
+async function resolveDragEndpoints(tabState, dragOptions) {
+  let start = dragOptions.start;
+  if (!start) {
+    const handle = dragOptions.handle;
+    let locator = null;
+    try { locator = refToLocator(tabState.page, handle, tabState.refs); } catch { locator = null; }
+    if (!locator) {
+      try {
+        const candidate = tabState.page.locator(handle);
+        if (await candidate.count() > 0) locator = candidate.first();
+      } catch { locator = null; }
+    }
+    if (!locator) {
+      const err = new Error(`drag handle not found: ${handle} (take a snapshot first, then pass the ref)`);
+      err.statusCode = 400;
+      throw err;
+    }
+    const box = await locator.boundingBox({ timeout: 3000 }).catch(() => null);
+    if (!box) {
+      const err = new Error(`drag handle has no bounding box: ${handle}`);
+      err.statusCode = 422;
+      throw err;
+    }
+    start = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  }
+  const end = dragOptions.end || {
+    x: start.x + (dragOptions.deltaX || 0),
+    y: start.y + (dragOptions.deltaY || 0),
+  };
+  return { start, end };
+}
 
 // --- /tabs/:tabId/upload timeouts (ms) ---
 // UPLOAD_UI_TIMEOUT_MS is the default for the request's optional `timeout`: the
@@ -7303,6 +7462,14 @@ app.delete('/tabs/:tabId/network', async (req, res) => {
  *                   that a bare arrow function (`() => x`, uncalled) evaluates to a
  *                   function object and serializes to no result.
  *                 example: document.title
+ *               timeoutMs:
+ *                 type: integer
+ *                 minimum: 1000
+ *                 maximum: 300000
+ *                 description: >-
+ *                   Per-request evaluation budget in milliseconds. Defaults to the server's
+ *                   request timeout. Long scrapes that used to die at the global timeout can
+ *                   raise this up to 300000 (5 minutes); `timeout` is accepted as an alias.
  *     responses:
  *       200:
  *         description: Evaluation result.
@@ -7356,11 +7523,18 @@ app.post('/tabs/:tabId/evaluate', express.json({ limit: CONFIG.evaluateMaxBodySi
     const { tabState } = found;
     tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
 
+    const reqTimeout = Number(req.body.timeoutMs || req.body.timeout);
+    const evaluateTimeoutMs = Number.isFinite(reqTimeout) && reqTimeout > 0
+      ? Math.min(300000, Math.max(1000, reqTimeout))
+      : requestTimeoutMs();
+
     pluginEvents.emit('tab:evaluate', { userId, tabId: req.params.tabId, expression });
     const result = await withUserLimit(userId, () => withTabLock(
       req.params.tabId,
       () => tabState.page.evaluate(expression),
-      requestTimeoutMs(),
+      evaluateTimeoutMs,
+      // A timed-out evaluation is unrecoverable: destroy the tab so queued work
+      // cannot run against a page whose CDP state is still being drained.
       () => destroyTimedOutTab(session, req.params.tabId, 'operation_timeout', userId),
     ));
     pluginEvents.emit('tab:evaluated', { userId, tabId: req.params.tabId, result });
@@ -7404,6 +7578,11 @@ app.post('/tabs/:tabId/evaluate', express.json({ limit: CONFIG.evaluateMaxBodySi
  *                 type: string
  *               expression:
  *                 type: string
+ *               timeoutMs:
+ *                 type: integer
+ *                 minimum: 1000
+ *                 maximum: 300000
+ *                 description: Per-request evaluation budget in ms (defaults to the server request timeout).
  *     responses:
  *       200:
  *         description: Evaluation result in `result`.
@@ -7449,6 +7628,11 @@ app.post('/tabs/:tabId/evaluate-main', express.json({ limit: CONFIG.evaluateMaxB
     const { tabState } = found;
     tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
 
+    const reqTimeout = Number(req.body.timeoutMs || req.body.timeout);
+    const evaluateTimeoutMs = Number.isFinite(reqTimeout) && reqTimeout > 0
+      ? Math.min(300000, Math.max(1000, reqTimeout))
+      : requestTimeoutMs();
+
     pluginEvents.emit('tab:evaluate', { userId, tabId: req.params.tabId, expression, mainWorld: true });
     // With disableWorldIsolation the "main" world is where the injected script runs.
     const result = await withUserLimit(userId, () => withTabLock(
@@ -7463,7 +7647,10 @@ app.post('/tabs/:tabId/evaluate-main', express.json({ limit: CONFIG.evaluateMaxB
         // Use Playwright's main-world evaluation where available.
         return await tabState.page.mainFrame().evaluate(expression);
       },
-      requestTimeoutMs(),
+      evaluateTimeoutMs,
+      // Same rule as /evaluate: a timed-out main-world script leaves the page
+      // in an unknown state, so destroy the tab instead of letting queued work
+      // race the still-running evaluation.
       () => destroyTimedOutTab(session, req.params.tabId, 'operation_timeout', userId),
     ));
     pluginEvents.emit('tab:evaluated', { userId, tabId: req.params.tabId, result });
@@ -8482,7 +8669,19 @@ app.post('/tabs/open', async (req, res) => {
     if (totalTabs >= MAX_TABS_PER_SESSION || getTotalTabCount() >= MAX_TABS_GLOBAL) {
       const recycled = await recycleOldestTab(session, req.reqId, userId);
       if (!recycled) {
-        return res.status(429).json({ error: 'Maximum tabs per session reached' });
+        const openTabs = [];
+        for (const grp of session.tabGroups.values()) {
+          for (const [tid, state] of grp) {
+            openTabs.push({ tabId: tid, url: safePageUrl(state.page), pinned: !!state.pinned });
+          }
+        }
+        return res.status(429).json({
+          error: `Maximum tabs per session reached (${totalTabs}/${MAX_TABS_PER_SESSION})`,
+          tabs: openTabs,
+          totalTabs,
+          maxTabs: MAX_TABS_PER_SESSION,
+          hint: 'Close unused or completed tabs with action=close before opening new ones.'
+        });
       }
     }
     
