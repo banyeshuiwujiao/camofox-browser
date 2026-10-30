@@ -6985,6 +6985,10 @@ app.get('/tabs/:tabId/images', async (req, res) => {
  *         in: query
  *         required: false
  *         description: Capture the full scrollable page instead of the viewport.
+ *       - name: clip
+ *         in: query
+ *         required: false
+ *         description: Viewport-coordinate crop as "x,y,width,height". When present, fullPage is ignored.
  *         schema:
  *           type: boolean
  *           default: false
@@ -7020,7 +7024,14 @@ app.get('/tabs/:tabId/screenshot', async (req, res) => {
     session.lastAccess = Date.now();
     
     const { tabState } = found;
-    const buffer = await tabState.page.screenshot({ type: 'png', fullPage });
+    let clip;
+    if (req.query.clip) {
+      const [cx, cy, cw, ch] = String(req.query.clip).split(',').map(Number);
+      if ([cx, cy, cw, ch].every(v => Number.isFinite(v) && v >= 0) && cw > 0 && ch > 0) {
+        clip = { x: cx, y: cy, width: cw, height: ch };
+      }
+    }
+    const buffer = await tabState.page.screenshot(clip ? { type: 'png', clip } : { type: 'png', fullPage });
     pluginEvents.emit('tab:screenshot', { userId, tabId: req.params.tabId, buffer });
     res.set('Content-Type', 'image/png');
     res.send(buffer);

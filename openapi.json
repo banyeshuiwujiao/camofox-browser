@@ -2958,7 +2958,13 @@
             "name": "fullPage",
             "in": "query",
             "required": false,
-            "description": "Capture the full scrollable page instead of the viewport.",
+            "description": "Capture the full scrollable page instead of the viewport."
+          },
+          {
+            "name": "clip",
+            "in": "query",
+            "required": false,
+            "description": "Viewport-coordinate crop as \"x,y,width,height\". When present, fullPage is ignored.",
             "schema": {
               "type": "boolean",
               "default": false

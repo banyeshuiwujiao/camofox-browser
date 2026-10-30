@@ -217,6 +217,10 @@ export const TOOL_DEFS = [
           type: 'boolean',
           description: 'Capture the full scrollable page instead of the viewport (default false)',
         },
+        clip: {
+          type: 'string',
+          description: 'Viewport-coordinate crop as x,y,width,height (pixels). When present, fullPage is ignored.',
+        },
       },
       required: ['tabId'],
     },
